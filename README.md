@@ -34,6 +34,7 @@ Global skills land in `~/.claude/skills/`. Project-level installs land in `.clau
 
 | Skill | Description |
 |---|---|
+| [`error-handling`](./error-handling) | Reference for `@power-rent/try-catch` error handling patterns in async operations, including no-throw flows, reporting, breadcrumbs, tagging, migration, and testing. |
 | [`react-relay`](./react-relay) | Comprehensive reference for React Relay — hooks, directives, mutations, caching, network layer, resolvers, entrypoints, runtime, testing, debugging, principles, and codemods. Sourced from [relay.dev](https://relay.dev). |
 
 ## Skill Format
