@@ -27,7 +27,11 @@ def fail(msg):
 
 
 def load(argv):
-    raw = open(argv[1]).read() if len(argv) > 1 else sys.stdin.read()
+    if len(argv) > 1:
+        with open(argv[1]) as f:
+            raw = f.read()
+    else:
+        raw = sys.stdin.read()
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
@@ -42,7 +46,10 @@ def load(argv):
         if not (isinstance(e, list) and len(e) == 2):
             fail(f"each edge must be a [unit, dependency] pair, got: {e!r}")
         edges.append((e[0], e[1]))
-    nodes = set(data.get("nodes", []))
+    raw_nodes = data.get("nodes", [])
+    if not isinstance(raw_nodes, list):
+        fail('"nodes" must be a list of unit names')
+    nodes = set(raw_nodes)
     for a, b in edges:
         nodes.add(a)
         nodes.add(b)
