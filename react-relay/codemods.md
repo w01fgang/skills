@@ -33,12 +33,12 @@ Progressive rollout is supported via the `--rollout-percentage` parameter (short
 ```json
 {
   "featureFlags": {
-    "enforce_fragment_alias_where_ambiguous": { "kind": "disabled" }
+    "enforce_fragment_alias_where_ambiguous": { "kind": "rollout", "rollout": 20 }
   }
 }
 ```
 
-After the codemod runs, flip the flag to `"enabled"` (or remove it) and migrate the `_fixme` sites to real `@alias` annotations over time.
+Run the codemod with the same percentage (`-r 20`). Raise both numbers in steps, then set the flag to `{ "kind": "enabled" }` and migrate the `_fixme` sites to real `@alias` annotations over time.
 
 ### `remove-unnecessary-required-directives`
 

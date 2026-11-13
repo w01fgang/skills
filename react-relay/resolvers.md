@@ -438,6 +438,7 @@ function Counter() {
 When one action mutates many slices, wrap dispatch so Relay coalesces recomputation:
 
 ```tsx
+// relayStore: the Relay Store instance that you pass to the Environment
 const originalDispatch = store.dispatch;
 store.dispatch = (action) => {
   relayStore.batchLiveStateUpdates(() => {

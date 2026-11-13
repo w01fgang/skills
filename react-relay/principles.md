@@ -116,7 +116,7 @@ A parent may not read fields from a child's fragment without spreading it. A chi
 
 ## 3. Architecture Overview
 
-Relay has three core parts: the Relay Compiler, the Relay Runtime, and React/Relay (the hooks). The network layer is a component of the runtime:
+Relay has three core parts: the Relay Compiler, the Relay Runtime, and React/Relay (the hooks). The network layer is a component of the runtime. The data flow:
 
 ```
 +-------------+      +-------------+      +-------------+

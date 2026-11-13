@@ -462,7 +462,7 @@ Break the cycle — one fragment should not transitively include itself.
 | `@appendEdge` inserts but list doesn't update | Connection ID in store | Does mutation's `connections` array match exactly? | Use `ConnectionHandler.getConnectionID` with same filters |
 | Field null in component | DevTools Network response | Is value null in raw payload? | Fix server resolver or add field to fragment |
 | Field null after navigation | DevTools store inspector | Record evicted by GC? | Increase `gcReleaseBufferSize` or retain with `useQueryLoader` |
-| Non-null schema field is null | Is `@required` on a child? | `action: LOG` or `THROW`? | Downgrade to `NONE` or add error boundary |
+| Non-null schema field is null | Is `@required` on a child? | `action: LOG` or `THROW`? | Remove `@required` to see the raw null, or add error boundary |
 | `data.field` is undefined | Fragment selections in `__generated__` artifact | Is the field present? | Re-run `relay-compiler` |
 | Compiler: Unknown fragment | Is file under `src` glob? | Is it in `exclude`? | Update `relay.config.json` |
 | Compiler: type has no field X | Schema file fresh? | Pointed at right `.graphql`? | Update schema, rerun compiler |
