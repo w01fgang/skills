@@ -245,8 +245,8 @@ cold cache). Wrap the component in a `<Suspense>` boundary.
 - Recreating the `variables` object identity on every render still works
   (Relay compares by value), but avoid constructing it inline when `fetchKey`
   changes are not intended.
-- Cannot be used below a route-level `usePreloadedQuery` without creating
-  waterfalls.
+- Below a `usePreloadedQuery`, a lazy query can create a waterfall. The docs
+  prefer `usePreloadedQuery`.
 
 ---
 

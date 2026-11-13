@@ -536,8 +536,7 @@ used to make conditional / type-refined fragments null-safe.
 the fragment name for a fragment spread and the type name for an inline
 fragment. An inline fragment with no type condition needs `as`.
 
-**Where** — fragment spread, inline fragment. Relay v21 also accepts `@alias`
-on fragment definitions.
+**Where** — fragment spread, inline fragment.
 
 ```graphql
 fragment Feed_viewer on Viewer {
@@ -783,7 +782,7 @@ import { MatchContainer } from "react-relay";
 | `@refetchable`         | fragment on Query / Viewer / Node               | Generate a refetch query |
 | `@inline`              | fragment def                                    | Read data outside React render |
 | `@relay(plural)`       | fragment def                                    | Fragment expects a list of refs |
-| `@relay(mask: false)`  | fragment spread / def                              | Disable data masking |
+| `@relay(mask: false)`  | fragment spread / def                           | Disable data masking |
 | `@connection`          | connection field                                | Register a paginated connection |
 | `@appendEdge`          | mutation edge field                             | Append edge to connections |
 | `@prependEdge`         | mutation edge field                             | Prepend edge to connections |
@@ -798,7 +797,7 @@ import { MatchContainer } from "react-relay";
 | `@throwOnFieldError`   | query / fragment                                | Throw on field errors; non-null types |
 | `@catch`               | field / fragment / query / mutation             | Catch field errors into result |
 | `@semanticNonNull`     | schema field definition                         | Mark field non-null except on errors |
-| `@alias`               | fragment spread / inline fragment / fragment def | Null-safe nested access |
+| `@alias`               | fragment spread / inline fragment               | Null-safe nested access |
 | `@relayField`          | docblock                                        | Define resolver field |
 | `@relayType`           | docblock                                        | Define resolver type |
 | `@rootFragment`        | docblock                                        | Data a derived resolver reads |
@@ -809,4 +808,4 @@ import { MatchContainer } from "react-relay";
 | `@raw_response_type`   | query / mutation def                            | Type optimisticResponse |
 | `@no_inline`           | fragment def                                    | Don't inline into parents |
 | `@match`               | union/interface field                           | 3D code-split selector |
-| `@module`              | inline fragment inside @match                   | Bundle path per variant |
+| `@module`              | fragment spread                                 | Bundle path per variant |

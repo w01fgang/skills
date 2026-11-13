@@ -72,8 +72,8 @@ In v21 it rewrites `@RelayResolver` docblocks to `@relayType` / `@relayField`.
 - **`@live_query` is removed.** Use `@client_polling(interval: ...)` for polling or `@live` for server-pushed updates.
 - **Resolver docblocks:** `@RelayResolver` becomes `@relayType` / `@relayField`. The verbose legacy tags (`@onType`, `@onInterface`, `@fieldName`, `@edgeTo`) are removed. Run `codemod fix-all`, or enable the `allow_legacy_relay_resolver_tag` feature flag to keep the old tag for now.
 - **`@oneOf` inputs** generate a discriminated union type that permits 1 property at a time. Set `"oneOfType": "ignore"` in the compiler config to keep the object type with all-optional fields. (The v21 release notes name the value `"relaxed"`; the compiler config schema accepts `"strict"` and `"ignore"`.)
-- **Compiler flags:** `relay-compiler --validate` exits with a non-zero code when an artifact is out of date, and writes nothing. `relay-compiler --no-watchman` (21.0.1) finds files by directory traversal; `--watch` needs watchman.
-- **Experimental React Server Components entry point:** `react-relay/rsc_EXPERIMENTAL` exports `serverFetchQuery`, `serverReadFragment`, `serverPreloadQuery` and `useQueryFromServer`. The API can change between versions.
+- **Compiler flags:** `relay-compiler --validate` exits with a non-zero code when an artifact is out of date, and writes nothing. `relay-compiler --noWatchman` (21.0.1) finds files by directory traversal; `--watch` needs watchman. (The compiler docs page spells the flag `--no-watchman`; the 21.0.1 CLI defines its flags in camel case.)
+- **Experimental React Server Components entry points:** `react-relay/rsc_EXPERIMENTAL` exports `createServerEnvironment`, which returns `serverFetchQuery`, `serverReadFragment` and `serverPreloadQuery`. `react-relay/rsc-client_EXPERIMENTAL` exports `useQueryFromServer`. The API can change between versions.
 
 ## Upgrading from Flow to TypeScript type emission
 

@@ -68,13 +68,13 @@ Consequences:
 
 ### 2.3 Render-as-you-fetch (hooks)
 
-The hooks API expresses three request shapes:
+The hooks API has these request hooks:
 
 | Hook | Purpose |
 | --- | --- |
 | `useFragment` | Read a fragment's data for a component; subscribe to changes |
 | `usePreloadedQuery` | Read a query whose fetch was started earlier (outside render) |
-| `useLazyLoadQuery` | Fetch on first render; use only when preloading is impossible |
+| `useLazyLoadQuery` | Fetch on first render; the docs prefer `usePreloadedQuery` |
 | `useQueryLoader` | Start a fetch imperatively (e.g. on route transition) |
 
 The canonical pattern is render-as-you-fetch: kick off the query before rendering (route change, link hover, event handler) with `loadQuery`, then render a component that calls `usePreloadedQuery`. Data and code stream in parallel rather than sequentially.

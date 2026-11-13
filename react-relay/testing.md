@@ -617,12 +617,12 @@ test('UserCard renders', async () => {
 ```ts
 export default {
   testEnvironment: 'jsdom',
-  setupFilesAfterEach: ['@testing-library/jest-dom'],
-  transform: { '^.+\\.tsx?$': ['ts-jest', { isolatedModules: true }] },
+  setupFilesAfterEnv: ['@testing-library/jest-dom'],
+  transform: { '^.+\\.tsx?$': ['ts-jest', { isolatedModules: true, babelConfig: true }] },
 };
 ```
 
-Relay generates artifacts via `relay-compiler`. Run it before tests, or use `jest-transform-graphql` to compile on-the-fly.
+Relay generates artifacts via `relay-compiler`. Run it before tests. The Jest transform must apply `babel-plugin-relay` (here through ts-jest's `babelConfig`, or use `babel-jest`), which replaces each `graphql` tag with its artifact.
 
 ## Troubleshooting
 

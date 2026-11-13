@@ -89,7 +89,7 @@ Note: the response *is* written to the store after arrival — subsequent `store
 
 #### `store-only`
 
-Never hit the network. Caller guarantees data is already present (e.g. written by a mutation optimistic updater, seeded by SSR, or prefetched by another route). Also useful for reading purely client-only `@client`/local schema fields.
+Never hit the network. Caller guarantees data is already present (e.g. written by a mutation optimistic updater, seeded by SSR, or prefetched by another route). Also useful for reading client-only fields from a client schema extension.
 
 ```tsx
 const data = useLazyLoadQuery<PreloadedQuery>(
@@ -545,7 +545,7 @@ Mounted readers of that record should use `useSubscribeToInvalidationState` to r
 | "Pull to refresh" / manual refresh button | `network-only` | User explicitly asked for fresh |
 | Post-mutation confirmation screen | `network-only` | Avoid stale optimistic state |
 | Route prefetched via `useQueryLoader` | `store-or-network` | Loader warms cache; consumer reuses |
-| Client-only / `@client` field read | `store-only` | No server source of truth |
+| Client-only field read (client schema extension) | `store-only` | No server source of truth |
 | Optimistic-only UI slice | `store-only` | Data is synthesized locally |
 | Detail view opened from a list (both queries overlap) | `store-or-network` + `missingFieldHandlers` | Maximize cache hit via `node(id:)` mapping |
 | Data known to expire on a schedule | `store-or-network` + `queryCacheExpirationTime` | Age-based auto-refetch |
