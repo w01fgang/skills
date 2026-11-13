@@ -1,537 +1,697 @@
 # Relay Runtime API
 
-The `relay-runtime` package exposes the imperative core that sits below the React hooks. Hooks are the preferred way to read/write data from components — the runtime APIs exist for the cases hooks cannot serve: bootstrapping the Environment, orchestrating side effects outside React, SSR, imperative prefetching, writing store updaters, and authoring utility modules (e.g. publish/subscribe bridges).
-
-This file documents those APIs.
+The `relay-runtime` package holds the Relay `Environment`, the `Store`, and the imperative APIs that work outside React hooks. This file documents those APIs.
 
 ## 1. Environment
 
-The `Environment` is the root object wiring together network, store, handlers, and logging. It is the single argument every imperative runtime API takes.
+The core of Relay's runtime is the `Environment`. The environment knows how to make requests to your GraphQL server and contains the `Store`, Relay's normalized data cache. Generally an application constructs a single environment and exposes it to all components via `RelayEnvironmentProvider`.
 
 ### Construction
 
-```ts
-import {
-  Environment,
-  Network,
-  RecordSource,
-  Store,
-  Observable,
-  type GraphQLResponse,
-  type RequestParameters,
-  type Variables,
-  type HandlerProvider,
-  type MissingFieldHandler,
-  type LogRequestInfoFunction,
-} from 'relay-runtime';
+To create an environment, provide a `Network` and a `Store`. The `Network` makes requests to your GraphQL server. The `Store` holds the normalized data cache.
 
-function fetchFn(
-  params: RequestParameters,
-  variables: Variables,
-): Observable<GraphQLResponse> {
-  return Observable.create((sink) => {
-    fetch('/graphql', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({query: params.text, variables}),
-    })
-      .then((r) => r.json())
-      .then((json) => {
-        sink.next(json);
-        sink.complete();
-      })
-      .catch(sink.error);
+```ts
+import { Environment, Store, RecordSource, Network, FetchFunction } from "relay-runtime";
+
+const HTTP_ENDPOINT = "https://graphql.org/graphql/";
+
+const fetchGraphQL: FetchFunction = async (request, variables) => {
+  const resp = await fetch(HTTP_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query: request.text, variables }),
   });
-}
+  if (!resp.ok) {
+    throw new Error("Response failed.");
+  }
+  return await resp.json();
+};
 
 export const environment = new Environment({
-  network: Network.create(fetchFn),
-  store: new Store(new RecordSource()),
-  isServer: typeof window === 'undefined',
-  treatMissingFieldsAsNull: false,
+  store: new Store(new RecordSource({})),
+  network: Network.create(fetchGraphQL),
 });
 ```
 
 ### Constructor options
 
-| Option | Type | Purpose |
-| --- | --- | --- |
-| `network` | `INetwork` | Required. Executes queries, mutations, subscriptions. Built with `Network.create(fetch, subscribe?)`. |
-| `store` | `Store` | Required. Holds normalized records and tracks subscribers. |
-| `handlerProvider` | `(handle: string) => Handler` | Maps `@__clientField(handle: "...")` / connection handles to runtime handlers. Defaults to `RelayDefaultHandlerProvider`. |
-| `operationLoader` | `{ get(ref): ?Node; load(ref): Promise<?Node> }` | Required if using `@module` / 3D. Resolves split operations lazily. |
-| `missingFieldHandlers` | `MissingFieldHandler[]` | Lets Relay satisfy missing scalars / linked records from adjacent data (e.g. treat `node(id:$x)` as already cached if `User:$x` exists). |
-| `isServer` | `boolean` | Disables client-only optimizations; set `true` during SSR. |
-| `treatMissingFieldsAsNull` | `boolean` | If `true`, reads return `null` for missing fields instead of suspending / erroring. |
-| `log` | `(event: LogEvent) => void` | Receives lifecycle events: `queryresource.fetch`, `network.start/next/complete/error`, `execute.start/next/error/complete`, `store.publish`, `store.gc`, etc. Use for metrics. |
-| `requiredFieldLogger` | `(event) => void` | Receives `@required` violations without throwing. |
-| `scheduler` | `TaskScheduler` | Custom scheduler for batching store notifications (e.g. `unstable_batchedUpdates`). |
-| `getDataID` | `(fieldValue, typeName) => string` | Override Relay's default identity (default reads `id`). Useful for composite keys. |
-| `UNSTABLE_defaultRenderPolicy` | `'partial' \| 'full'` | Toggles whether partial store data satisfies a read. |
+The environment accepts additional optional configuration options.
+
+| Option | Notes |
+| --- | --- |
+| `network` | Makes requests to the GraphQL server. Built with `Network.create(fetchFn)`. |
+| `store` | Holds the normalized data cache. |
+| `log` | A function that Relay calls with telemetry events. See the `LogEvent` types for the full list of events and their fields. |
+| `missingFieldHandlers` | A list of handlers that Relay calls when a field is missing from the store. Use them to fulfill queries to fields like `Query.node` from cache. |
+| `getDataID` | A function that Relay calls to generate a unique ID for an object. Use it when the server does not implement the Global Object Identification spec. |
+| `relayFieldLogger` | A function that Relay calls when it encounters a field-level error (see section 11). |
+| `deferDeduplicatedFields` | (v21 only) When `true`, Relay does not throw if a deferred response omits fields. The latest `@defer` spec proposal does not send duplicate fields in deferred responses. Relay does not support that proposal natively; use this option to transform responses into a format that Relay accepts. |
 
 ### `missingFieldHandlers` example
 
-```ts
-const handlers: MissingFieldHandler[] = [
+```js
+const {ROOT_TYPE, Environment} = require('relay-runtime');
+
+const missingFieldHandlers = [
   {
-    kind: 'linked',
-    handle(field, record, args, store) {
+    handle(field, record, argValues): ?string {
+      // Make sure to add a handler for the node field
       if (
         record != null &&
         record.getType() === ROOT_TYPE &&
         field.name === 'node' &&
-        args.id != null
+        argValues.hasOwnProperty('id')
       ) {
-        return args.id; // satisfy node(id:) from any cached record with that id
+        return argValues.id
       }
       return undefined;
     },
+    kind: 'linked',
   },
 ];
+
+const environment = new Environment({/*...*/, missingFieldHandlers});
 ```
+
+- `missingFieldHandlers` is an array of handlers. Each handler specifies a `handle` function and the kind of missing fields it handles: `'scalar'` or `'linked'`.
+- The `handle` function takes the missing field, the record that the field belongs to, and the arguments that the query passed to the field.
+- For a `'scalar'` field, the `handle` function returns a scalar value. For a `'linked'` field, it returns an ID that references another object in the store.
+- When Relay detects missing data while it fulfills a query from the local cache, it runs the matching handlers before it declares the data missing.
 
 ## 2. Store
 
-`Store` wraps a `RecordSource` and coordinates retention, GC, and subscriptions.
+The `Store` is the source of truth for application data. It holds the canonical set of records as a `RecordSource`.
 
-```ts
-const source = new RecordSource();      // in-memory normalized record map
-const store = new Store(source, {
-  gcScheduler: (run) => setTimeout(run, 0),
-  gcReleaseBufferSize: 10,               // retain N most-recent released ops
-  queryCacheExpirationTime: 5 * 60_1000, // ms before cached ops are invalidated
-});
+### Store operations
+
+- `lookup(selector)`: reads the results of a selector from the store.
+- `subscribe(snapshot, callback)`: subscribes to changes to the results of a selector. The callback runs when published data changes the results of the snapshot's selector.
+- `publish(source)`: updates the store with a `RecordSource`. Query, mutation, and subscription results and optimistic mutation updates all use this form.
+- `notify()`: calls the `subscribe()` callbacks whose results changed because of intervening `publish()` calls.
+- `retain(selector)`: keeps all records that the selector needs in memory. The records are not eligible for garbage collection until the returned reference is disposed.
+
+### Store constructor options
+
+The Relay Store accepts options that control garbage collection and staleness.
+
+```js
+const store = new Store(source, {gcScheduler});
 ```
 
-### Core methods
-
-```ts
-interface Store {
-  // Retention & GC
-  retain(operation: OperationDescriptor): Disposable;
-  holdGC(): Disposable;          // pause garbage collection
-  check(operation): OperationAvailability; // 'available' | 'stale' | 'missing'
-
-  // Reads
-  lookup(selector: SingularReaderSelector): Snapshot;
-  subscribe(snapshot: Snapshot, cb: (next: Snapshot) => void): Disposable;
-
-  // Writes
-  publish(source: RecordSource, idsMarkedForInvalidation?: Set<DataID>): void;
-  notify(
-    sourceOperation?: OperationDescriptor,
-    invalidateStore?: boolean,
-  ): ReadonlyArray<RequestDescriptor>;
-
-  // Persistence
-  snapshot(): void;              // stash optimistic state
-  restore(): void;               // roll back to last snapshot
-
-  getSource(): RecordSource;
-}
+```js
+const store = new Store(source, {gcReleaseBufferSize: 10});
 ```
 
-### Typical lifecycle
-
-1. `network` delivers a response.
-2. Relay writes it into a `RecordSource`.
-3. `store.publish(recordSource)` merges it into the live source.
-4. `store.notify()` walks subscribers whose snapshots changed and calls them.
-5. `store.retain(operation)` keeps the data alive; disposing the returned `Disposable` releases it to the GC buffer.
-
-### Manual read + subscribe
-
-```ts
-import {createOperationDescriptor, getRequest} from 'relay-runtime';
-
-const request = getRequest(MyQuery);
-const operation = createOperationDescriptor(request, {id: '42'});
-const retain = environment.retain(operation);
-
-const snapshot = environment.lookup(operation.fragment);
-console.log(snapshot.data);
-
-const sub = environment.subscribe(snapshot, (next) => {
-  console.log('updated', next.data);
-});
-
-// later
-sub.dispose();
-retain.dispose();
+```js
+const store = new Store(source, {queryCacheExpirationTime: 5 * 60 * 1000 });
 ```
 
-### Pause GC during batch writes
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `gcScheduler` | `resolveImmediate` | A function that accepts a callback and schedules a garbage collection run. Provide one to make scheduling less aggressive, for example based on time or scheduler priorities. By convention, implementations do not execute the callback immediately. |
+| `gcReleaseBufferSize` | `10` | The number of released queries that the Store keeps retained. With a size of 0, Relay collects queries immediately after release. |
+| `queryCacheExpirationTime` | none | Age in ms after which a fetched query is stale. Without it, staleness checks look only at invalidated records. |
+| `resolverContext` | none | Value that Relay passes to resolvers (see `resolvers.md`). Pass it to `RelayModernStore`. |
 
-```ts
-const hold = environment.getStore().holdGC();
-try {
-  for (const op of many) environment.commitPayload(op, data[op.name]);
-} finally {
-  hold.dispose(); // GC resumes
-}
-```
+### `publish()` and `notify()`
 
-### Optimistic snapshot / restore
+- `publish(source)` updates the store with `source`. It does not call subscribers.
+- `notify()` calls the subscribers whose results changed since the last `notify()`.
+- Call `publish()` several times, then `notify()` once, to deliver many payloads in one subscriber pass.
+- Merge rules of `publish()`: records that exist only in the source are added; records that exist in both are merged into a new record (inputs unchanged); records that are `null` in the source are deleted (set to null); records with the special sentinel value are removed (this undoes an optimistic record).
+- `notify()` checks each subscription in 3 steps. First, it compares the changed record IDs with the IDs in the subscription's last `Snapshot`; no overlap skips the subscription. Second, it re-reads the overlapping subscriptions and compares the new result with the old one. Third, it calls the callback only when the result changed.
 
-`snapshot()` captures the pre-optimistic store state; `restore()` rolls back. You rarely call these directly — `commitMutation` wraps them around `optimisticUpdater` / `optimisticResponse`.
+### Availability and invalidation
+
+Relay does not consider data in the store stale, regardless of age, unless the data is marked as stale by the invalidation APIs or is older than the query cache expiration time.
+
+A stale query is a query that Relay can fulfill with records from the store, and for which either of these holds:
+
+- The time since Relay last fetched the query is greater than the query cache expiration time.
+- The query contains at least one record that `invalidateStore()` or `invalidateRecord()` invalidated.
+
+The staleness check occurs when Relay makes a new request (for example in a call to `loadQuery`). Components that reference stale data can still render that data. Requests that would use stale data go to the network.
+
+The docs write `environment.check(query) === 'stale'`. The source returns an object with a `status` field, so compare `environment.check(operation).status === 'stale'`.
+
+- `invalidateStore()` marks all data that the store holds at call time as stale.
+- `record.invalidateRecord()` marks a record as stale. Queries that reference that record are stale.
+- The hook `useSubscribeToInvalidationState` takes an array of IDs and a callback. The callback runs whenever the records for any of those IDs are marked as stale.
 
 ## 3. RecordSource and proxies
 
-`RecordSource` is the normalized record map: `DataID -> Record`. Two constructors:
+`RecordSource` is a collection of records keyed by their data ID. The store's record cache is a `RecordSource`.
 
-```ts
-new RecordSource();                 // empty
-new RecordSource(serialized);       // rehydrate from `source.toJSON()`
-```
-
-Inside updater functions you never touch `RecordSource` directly; you receive a proxy.
+Updater functions receive a proxy to the store. A mutation `updater` receives a `RecordSourceSelectorProxy`.
 
 ### `RecordSourceProxy`
 
-Low-level store mutation API passed to `commitLocalUpdate` and mutation `updater`s.
+The `RecordSourceProxy` serves as an interface to mutate records.
 
-```ts
+```javascript
 interface RecordSourceProxy {
-  create(dataID: string, typeName: string): RecordProxy;
-  delete(dataID: string): void;
-  get<T>(dataID: string): RecordProxy<T> | null | undefined;
+  create(dataID: DataID, typeName: string): RecordProxy;
+  delete(dataID: DataID): void;
+  get(dataID: DataID): ?RecordProxy;
   getRoot(): RecordProxy;
   invalidateStore(): void;
-
-  // Typed imperative updates (requires @updatable fragments/queries)
-  readUpdatableFragment(fragment, fragmentRef): UpdatableData;
-  readUpdatableQuery(query, variables): UpdatableData;
+  readUpdatableFragment<TFragmentType: FragmentType, TData>(
+    fragment: UpdatableFragment<TFragmentType, TData>,
+    fragmentReference: HasUpdatableSpread<TFragmentType>,
+  ): UpdatableData<TData>;
+  readUpdatableQuery<TVariables: Variables, TData>(
+    query: UpdatableQuery<TVariables, TData>,
+    variables: TVariables,
+  ): UpdatableData<TData>;
 }
 ```
 
+**Safety.** `RecordSourceProxy` exposes many low level APIs that are not typesafe. Consider typesafe updaters, optimistic updates, and Relay Resolvers instead if they cover your use case.
+
+Behavior of `delete(dataID)`: for existing edges to the deleted record, `undefined` is returned in the default case even when the value is typed as non-nullable. When `@throwOnFieldError` is present, the missing data throws an error. `invalidateStore()` marks all data written before the call as stale for `environment.check()` and for a `store-or-network` fetch policy. `record.invalidateRecord()` does the same for the queries that reference that record.
+
 ### `RecordSourceSelectorProxy`
 
-Extends `RecordSourceProxy` with selector-scoped helpers. Passed to mutation/subscription `updater`s because Relay knows which root fields the operation wrote.
+`RecordSourceSelectorProxy` is the type of the `store` that `updater` functions receive as an argument.
 
-```ts
-interface RecordSourceSelectorProxy extends RecordSourceProxy {
-  getRootField(fieldName: string): RecordProxy | null;
-  getPluralRootField(fieldName: string): Array<RecordProxy | null> | null;
+```javascript
+interface RecordSourceSelectorProxy {
+  create(dataID: string, typeName: string): RecordProxy;
+  delete(dataID: string): void;
+  get(dataID: string): ?RecordProxy;
+  getRoot(): RecordProxy;
+  getRootField(fieldName: string): ?RecordProxy;
+  getPluralRootField(fieldName: string): ?Array<?RecordProxy>;
+  invalidateStore(): void;
 }
 ```
 
 ### `RecordProxy`
 
-```ts
-interface RecordProxy<T = {}> {
+The `RecordProxy` serves as an interface to mutate records:
+
+```javascript
+interface RecordProxy {
+  copyFieldsFrom(sourceRecord: RecordProxy): void;
   getDataID(): string;
+  getLinkedRecord(name: string, arguments?: ?Object): ?RecordProxy;
+  getLinkedRecords(name: string, arguments?: ?Object): ?Array<?RecordProxy>;
+  getOrCreateLinkedRecord(
+    name: string,
+    typeName: string,
+    arguments?: ?Object,
+  ): RecordProxy;
   getType(): string;
-
-  getValue(name: string, args?: Variables): mixed;
-  setValue(value: mixed, name: string, args?: Variables): RecordProxy<T>;
-
-  getLinkedRecord(name: string, args?: Variables): RecordProxy | null;
-  setLinkedRecord(record: RecordProxy, name: string, args?: Variables): RecordProxy<T>;
-  getOrCreateLinkedRecord(name: string, typeName: string, args?: Variables): RecordProxy;
-
-  getLinkedRecords(name: string, args?: Variables): Array<RecordProxy | null> | null;
-  setLinkedRecords(records: Array<RecordProxy | null>, name: string, args?: Variables): RecordProxy<T>;
-
-  copyFieldsFrom(source: RecordProxy): void;
+  getValue(name: string, arguments?: ?Object): mixed;
+  setLinkedRecord(
+    record: RecordProxy,
+    name: string,
+    arguments?: ?Object,
+  ): RecordProxy;
+  setLinkedRecords(
+    records: Array<?RecordProxy>,
+    name: string,
+    arguments?: ?Object,
+  ): RecordProxy;
+  setValue(value: mixed, name: string, arguments?: ?Object): RecordProxy;
   invalidateRecord(): void;
 }
 ```
 
-Field arguments must exactly match the arguments the query used — `friends(first: 10)` is a different storage key from `friends(first: 20)`.
+If a field takes arguments, pass a bag of variables as the last parameter.
 
 ## 4. ConnectionHandler
 
-Helpers for mutating `@connection` edges consistently with Relay's pagination storage.
+`ConnectionHandler` is a utility module exposed by `relay-runtime` that aids in the manipulation of connections.
 
-```ts
-import {ConnectionHandler} from 'relay-runtime';
-
-ConnectionHandler.getConnection(parent, connectionKey, filters?): RecordProxy | null;
-ConnectionHandler.createEdge(store, connection, node, edgeType): RecordProxy;
-ConnectionHandler.insertEdgeBefore(connection, newEdge, beforeCursor?): void;
-ConnectionHandler.insertEdgeAfter(connection, newEdge, afterCursor?): void;
-ConnectionHandler.deleteNode(connection, nodeID): void;
+```javascript
+interface ConnectionHandler {
+  getConnection(
+    record: RecordProxy,
+    key: string,
+    filters?: ?Object,
+  ): ?RecordProxy,
+  createEdge(
+    store: RecordSourceProxy,
+    connection: RecordProxy,
+    node: RecordProxy,
+    edgeType: string,
+  ): RecordProxy,
+  insertEdgeBefore(
+    connection: RecordProxy,
+    newEdge: RecordProxy,
+    cursor?: ?string,
+  ): void,
+  insertEdgeAfter(
+    connection: RecordProxy,
+    newEdge: RecordProxy,
+    cursor?: ?string,
+  ): void,
+  deleteNode(connection: RecordProxy, nodeID: string): void
+}
 ```
 
-Example updater appending a comment:
+- `getConnection(record, key, filters)` retrieves a `RecordProxy` that represents a connection that a `@connection` directive annotated.
+- `createEdge(store, connection, node, edgeType)` creates an edge.
+- `insertEdgeBefore(connection, newEdge, cursor)` inserts the edge at the beginning of the connection, or before the specified `cursor`.
+- `insertEdgeAfter(connection, newEdge, cursor)` inserts the edge at the end of the connection, or after the specified `cursor`.
+- `deleteNode(connection, nodeID)` deletes any edges whose node ID matches the given ID.
 
-```ts
-function commentUpdater(store: RecordSourceSelectorProxy) {
-  const newComment = store.getRootField('commentCreate')?.getLinkedRecord('comment');
-  const feedback = store.get(feedbackID);
-  if (!newComment || !feedback) return;
+```javascript
+const user = store.get(userID);
+const friends = ConnectionHandler.getConnection(user, 'FriendsFragment_friends');
+const newFriend = store.get(newFriendId);
+const edge = ConnectionHandler.createEdge(store, friends, newFriend, 'UserEdge');
 
-  const conn = ConnectionHandler.getConnection(
-    feedback,
-    'FeedbackCommentsQuery_comments',
-  );
-  if (!conn) return;
+// No cursor provided, append the edge at the end.
+ConnectionHandler.insertEdgeAfter(friends, edge);
 
-  const edge = ConnectionHandler.createEdge(store, conn, newComment, 'CommentEdge');
-  ConnectionHandler.insertEdgeAfter(conn, edge);
-}
+// No cursor provided, insert the edge at the front:
+ConnectionHandler.insertEdgeBefore(friends, edge);
 ```
 
 ## 5. fetchQuery
 
-Imperative query execution. Returns an `Observable` — unlike `useLazyLoadQuery`, it does **not** retain the data. Retention is the caller's responsibility.
+Imperative query execution outside of React. `fetchQuery` returns an observable.
 
-```ts
-import {fetchQuery, graphql} from 'react-relay';
+```js
+// You should prefer passing an environment that was returned from useRelayEnvironment()
+const MyEnvironment = require('MyEnvironment');
+const {fetchQuery} = require('react-relay');
 
-fetchQuery<AppQuery>(
+fetchQuery(
   environment,
   graphql`
-    query AppQuery($id: ID!) { user(id: $id) { id name } }
+    query AppQuery($id: ID!) {
+      user(id: $id) {
+        name
+      }
+    }
   `,
-  {id: '4'},
-  {networkCacheConfig: {force: true}},
-).subscribe({
-  start:    ()     => {},
-  next:     (data) => console.log(data),
-  error:    (err)  => console.error(err),
-  complete: ()     => {},
+  {id: 4},
+)
+.subscribe({
+  start: () => {...},
+  complete: () => {...},
+  error: (error) => {...},
+  next: (data) => {...}
 });
 ```
 
-### Signature
+### Arguments
 
-```ts
-fetchQuery<TQuery>(
-  environment: IEnvironment,
-  query: GraphQLTaggedNode,
-  variables: Variables,
-  options?: {
-    networkCacheConfig?: {force?: boolean; poll?: number; metadata?: object};
-    fetchPolicy?: 'store-or-network' | 'network-only';
-  },
-): Observable<TQuery['response']>;
-```
+- `environment`: a Relay Environment instance to execute the request on.
+- `query`: the GraphQL query to fetch, specified using a `graphql` template literal.
+- `variables`: object with the variable values. These match the GraphQL variables declared in the query.
+- `options` (optional):
+  - `networkCacheConfig` (optional): object with cache config options. `force`: boolean; when `true`, Relay bypasses the network response cache. Defaults to `true`.
+  - `fetchPolicy` (optional): determines whether `fetchQuery` reuses data that the local Relay store already holds. `"network-only"` (default) always issues a network request. `"store-or-network"` reuses data from the store if the full query is available locally, and issues a network request otherwise.
+
+### Behavior
+
+Docs: `api-reference/relay-runtime/fetch-query`.
+
+- The request starts when you call `subscribe` or `toPromise`.
+- Relay de-dupes identical network requests (same query and variables) that are in flight at the same time and that `fetchQuery` initiated.
+- The `"store-and-network"` and `"store-only"` fetch policies are not supported, because `fetchQuery` issues a single network request and returns the response. The v20 docs omit `fetchPolicy`; the v20 source supports both values.
+- The observer accepts `start(subscription)`, `next(data)`, `error(err)`, `complete()`, and `unsubscribe(subscription)`. `data` is a snapshot of the query data that Relay reads from the store when a payload arrives from the server. The subscription covers the fetch only, not later changes to the data in the store.
+- `subscription.unsubscribe()` cancels the network request.
+- `fetchQuery` saves the fetched data to the in-memory Relay store and notifies components subscribed to the relevant data. It does not retain the data, so the data can leave the store at any point after the request completes. To keep the data, call `environment.retain()` on the query.
 
 ### `.toPromise()`
 
-```ts
-const data = await fetchQuery(env, Query, vars).toPromise();
+`toPromise()` starts the query and returns a Promise that resolves when the first piece of data returns from the server. It cancels further processing, so deferred or 3D data in the query may not be processed. The docs recommend against `toPromise()`.
+
+```js
+const {fetchQuery} = require('react-relay');
+
+fetchQuery(
+  environment,
+  graphql`
+    query AppQuery($id: ID!) {
+      user(id: $id) {
+        name
+      }
+    }
+  `,
+  {id: 4},
+)
+.toPromise() // NOTE: don't use, this can cause data to be missing!
+.then(data => {...})
+.catch(error => {...};
 ```
 
-Discouraged when the operation uses `@defer`, `@stream`, or `@module` — the promise resolves on the first payload and later chunks are lost.
+The promise rejects when the request fails. You cannot cancel it.
 
-### Retain across a render
+### Retain a query
 
-`fetchQuery` writes to the store but releases after the observable completes. To keep data alive:
+```js
+// Retain query; this will prevent the data for this query and
+// variables from being garbage collected by Relay
+const disposable = environment.retain(queryDescriptor);
 
-```ts
-const operation = createOperationDescriptor(getRequest(Query), vars);
-const disposable = environment.retain(operation);
-fetchQuery(environment, Query, vars).subscribe({
-  complete: () => {/* disposable.dispose() later */},
-});
+// Disposing of the disposable will release the data for this query
+// and variables, meaning that it can be deleted at any moment
+// by Relay's garbage collection if it hasn't been retained elsewhere
+disposable.dispose();
 ```
 
 ## 6. commitMutation
 
-```ts
-import {commitMutation, graphql} from 'react-relay';
+Imperatively execute a mutation.
 
-const disposable = commitMutation<LikeMutation>(environment, {
-  mutation: graphql`
-    mutation LikeMutation($input: LikeInput!) {
-      feedbackLike(input: $input) {
-        feedback { id likeCount viewerDoesLike }
+```js
+import type {FeedbackLikeMutation} from 'FeedbackLikeMutation.graphql';
+const React = require('React');
+
+const {graphql, commitMutation} = require('react-relay');
+
+function likeFeedback(environment: IEnvironment): Disposable {
+  return commitMutation<FeedbackLikeMutation>(environment, {
+    mutation: graphql`
+      mutation FeedbackLikeMutation($input: FeedbackLikeData!) {
+        feedback_like(data: $input) {
+          feedback {
+            id
+            viewer_does_like
+            like_count
+          }
+        }
       }
-    }
-  `,
-  variables: {input: {id: feedbackID}},
-  optimisticResponse: {
-    feedbackLike: {
-      feedback: {id: feedbackID, likeCount: current + 1, viewerDoesLike: true},
+    `,
+    variables: {
+      input: {
+        id: '123',
+      },
     },
-  },
-  optimisticUpdater: (store) => {
-    const fb = store.get(feedbackID);
-    fb?.setValue(true, 'viewerDoesLike');
-  },
-  updater: (store, data) => {
-    // Server response landed; coalesce with connection/cache updates.
-  },
-  onCompleted: (response, errors) => {
-    if (errors) console.warn(errors);
-  },
-  onError: (err) => console.error(err),
-  onUnsubscribe: () => {},
-  cacheConfig: {force: true},
-});
-
-// Cancel optimistic + suppress callbacks:
-disposable.dispose();
+  });
+}
 ```
 
 ### Config reference
 
+`MutationConfig<TMutationConfig: MutationParameters>`:
+
 | Field | Type | Notes |
 | --- | --- | --- |
-| `mutation` | `GraphQLTaggedNode` | The compiled `graphql` mutation. |
-| `variables` | `Variables` | Matches operation variables. |
-| `optimisticResponse` | raw server-shape object | Applied before the request returns; type matches `TMutation['rawResponse']`. Add `@raw_response_type` to the mutation to get the generated type. |
-| `optimisticUpdater` | `(store: RecordSourceSelectorProxy) => void` | Runs before the network response. Complements `optimisticResponse` for connection / handle updates. |
-| `updater` | `(store, data) => void` | Runs after the server response is normalized. Use for connection mutations (append/delete edges, cache invalidation). |
-| `onCompleted` | `(response, errors?) => void` | Called after all updaters apply. |
-| `onError` | `(error: Error) => void` | Network or GraphQL error. |
-| `onUnsubscribe` | `() => void` | Called if the returned `Disposable` is disposed. |
-| `cacheConfig` | `{force?, poll?, metadata?, transactionId?}` | Forwarded to the network layer. |
-| `uploadables` | `{[key: string]: File \| Blob}` | Used by multipart file uploads. |
-| `configs` | `DeclarativeMutationConfig[]` | Declarative range / node deletion directives (`RANGE_ADD`, `RANGE_DELETE`, `NODE_DELETE`). |
+| `mutation` | `GraphQLTaggedNode` | A mutation specified using a GraphQL literal. |
+| `variables` | `$ElementType<TMutationConfig, 'variables'>` | The variables to pass to the mutation. |
+| `optimisticResponse` | object | Optional. An object whose type matches the raw response type of the mutation. Decorate the mutation with `@raw_response_type` when you use this field. |
+| `optimisticUpdater` | `SelectorStoreUpdater` | Optional. A callback that runs when `commitMutation` is called, after Relay normalizes the `optimisticResponse` into the store. |
+| `updater` | `SelectorStoreUpdater` | Optional. A callback that runs when a payload is received, after Relay writes the payload into the store. |
+| `onCompleted` | `(response) => void` | Optional. A callback that runs when the mutation completes. |
+| `onError` | `(Error) => void` | Optional. A callback that runs if the mutation results in an error. |
+| `onUnsubscribe` | `() => void` | Optional. A callback that runs when the returned `Disposable` is disposed. |
+| `cacheConfig` | `CacheConfig` | Optional. `force`, `poll`, `liveConfigId`, `metadata`, `transactionId`. |
+| `uploadables` | `UploadableMap` | Optional. An object whose values are `File` or `Blob`. |
 
-### Declarative `configs`
+`SelectorStoreUpdater` is a function with the signature `(store: RecordSourceSelectorProxy, data) => void`. It imperatively writes and reads data to and from the Relay store.
 
-```ts
-configs: [
-  {
-    type: 'RANGE_ADD',
-    parentID: feedbackID,
-    connectionInfo: [{key: 'FeedbackComments_comments', rangeBehavior: 'append'}],
-    edgeName: 'feedbackCommentEdge',
-  },
-  {type: 'NODE_DELETE', deletedIDFieldName: 'deletedCommentId'},
-];
-```
+### Disposable semantics
+
+Docs: `api-reference/relay-runtime/commit-mutation`.
+
+- `dispose()` before the request completes cancels and reverts any optimistic updates, prevents the `onCompleted` and `onError` callbacks, and calls `onUnsubscribe`. It does not necessarily cancel the network request.
+- `dispose()` after the request completes does nothing.
+- `onCompleted` receives the mutation fragment as Relay reads it from the store after the updaters and the declarative mutation directives ran. Data inside unmasked fragments is absent. Records that `@deleteRecord` deleted can be `null`.
+
+### Updater execution
+
+Docs: `guided-tour/updating-data/graphql-mutations`, `imperatively-modifying-store-data`.
+
+1. If `optimisticResponse` is provided, Relay writes it into the store.
+2. If `optimisticUpdater` is provided, Relay executes it.
+3. If `optimisticResponse` was provided, Relay processes the declarative mutation directives on the optimistic response.
+4. On success, Relay rolls back the optimistic updates, writes the server response to the store, executes `updater` if provided (the server payload is a root field in the store), processes the declarative mutation directives with the server response, and calls `onCompleted`.
+5. On failure, Relay rolls back the optimistic updates and calls `onError`.
+
+The list follows the docs. The source at tags v20.1.1 and v21.0.1 (`RelayPublishQueue.js`) contradicts the order in steps 2 to 4: the handlers of the declarative directives run before `optimisticUpdater` and before `updater`.
+
+When another write updates the store while the mutation is in flight, Relay reverts the optimistic update, applies the new store update, and applies the optimistic update again.
+
+When 2 optimistic responses change the same value and the first rolls back, the second stays applied and Relay does not recompute it. If 2 optimistic responses each raise a like count by 1, the like count stays raised by 2.
 
 ## 7. requestSubscription
 
-```ts
-import {requestSubscription, graphql} from 'react-relay';
-import type {Disposable} from 'relay-runtime';
+Imperative API for establishing a GraphQL subscription.
 
-const disposable: Disposable = requestSubscription<UserSubscription>(environment, {
-  subscription: graphql`
-    subscription UserSubscription($input: InputData!) {
-      userChanged(input: $input) { id name }
-    }
-  `,
-  variables: {input: {userId: '4'}},
-  onNext: (payload) => { /* normalized, also written to store */ },
-  onError: (err) => console.error(err),
-  onCompleted: () => {},
-  updater: (store, data) => {},
-  cacheConfig: {metadata: {tenant: 'acme'}},
-});
+```js
+import {graphql, requestSubscription} from 'react-relay';
 
-// later
-disposable.dispose();
-```
-
-Network subscriptions require passing a `subscribe` function to `Network.create(fetch, subscribe)` — see the network skill file. `updater` fires on every payload.
-
-## 8. commitLocalUpdate
-
-Apply a purely-client-side mutation to the store. No network request, no optimistic lifecycle. Useful for UI state encoded as client fields, undo stacks, form drafts, derived client records.
-
-```ts
-import {commitLocalUpdate} from 'react-relay';
-
-commitLocalUpdate(environment, (store) => {
-  const root = store.getRoot();
-  let session = root.getLinkedRecord('session');
-  if (!session) {
-    session = store.create('client:session', 'Session');
-    root.setLinkedRecord(session, 'session');
+const subscription = graphql`
+  subscription UserDataSubscription($input: InputData!) {
+    # ...
   }
-  session.setValue(true, 'isSidebarOpen');
-});
-```
+`;
 
-Signature:
-
-```ts
-commitLocalUpdate(
-  environment: IEnvironment,
-  updater: (store: RecordSourceProxy) => void,
-): void;
-```
-
-For typed imperative edits, pair with `@updatable`:
-
-```graphql
-fragment SessionFragment on Session @updatable {
-  isSidebarOpen
+function createSubscription(environment: IEnvironment): Disposable {
+  return requestSubscription(environment, {
+    subscription,
+    variables: {input: {userId: '4'}},
+  });
 }
 ```
 
-```ts
-commitLocalUpdate(environment, (store) => {
-  const {updatableData} = store.readUpdatableFragment(SessionFragment, ref);
-  updatableData.isSidebarOpen = true;
-});
+`requestSubscription` returns a `Disposable` that clears the subscription.
+
+### Config reference
+
+`GraphQLSubscriptionConfig<TSubscriptionPayload>`; docs: `api-reference/relay-runtime/request-subscription`.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `subscription` | `GraphQLTaggedNode` | A GraphQL subscription specified using a `graphql` template literal. |
+| `variables` | object | The variables to pass to the subscription. |
+| `onNext` | `(TSubscriptionPayload) => {}` | Optional. Runs when new data is received. |
+| `onError` | `(Error) => {}` | Optional. Runs when an error occurs. |
+| `onCompleted` | `() => void` | Optional. The docs say "when the subscription is established"; the source passes it as the `complete` handler, so it follows the source. |
+| `updater` | `SelectorStoreUpdater` | Optional. Imperatively updates the store in response to the subscription payload. |
+| `cacheConfig` | `CacheConfig` | Optional. |
+
+## 8. commitLocalUpdate
+
+Relay provides APIs for purely local updates to the Relay store, which are not tied to a server operation. Local data updates apply to client-only data and to regular data fetched from the server.
+
+```js
+import type {Environment} from 'react-relay';
+
+const {commitLocalUpdate, graphql} = require('react-relay');
+
+function commitCommentCreateLocally(
+  environment: Environment,
+  feedbackID: string,
+) {
+  return commitLocalUpdate(environment, store => {
+    // Imperatively mutate the store here
+  });
+}
+
+module.exports = {commit: commitCommentCreateLocally};
+```
+
+- `commitLocalUpdate` takes an environment and an updater function.
+- `updater` takes a `store` argument, an instance of `RecordSourceSelectorProxy`. You can create new records, and update or delete existing ones.
+- Unlike regular and optimistic updaters, the updater of `commitLocalUpdate` does not accept a second parameter, because there is no associated network response.
+- Local data updates cause components subscribed to the data to be notified and to re-render.
+
+`environment.commitPayload(operation, payload)` takes an `OperationDescriptor` and the payload for the query, and writes it to the Relay store. Relay resolves the payload like a normal server response for a query. Create `operation` with `createOperationDescriptor`, which takes the query and the query variables. Type the payload with the Flow type that the directive `@raw_response_type` on the query generates. Subscribed components re-render after the write.
+
+For typed imperative edits, use an `@updatable` fragment with `readUpdatableFragment`:
+
+```javascript
+const fragment = graphql`
+  fragment StoryLikeButton_updatable on Story @updatable {
+    likeCount
+    doesViewerLike
+  }
+`;
+const {
+  updatableData
+} = store.readUpdatableFragment(
+  fragment,
+  story
+);
+updatableData.likeCount = updatableData.likeCount + 1
 ```
 
 ## 9. RelayEnvironmentProvider
 
-Publishes an `Environment` via React context so hooks can find it.
+`RelayEnvironmentProvider` sets a Relay environment in React Context. Usually a single instance of this component renders at the root of the application. Any Relay hook (like `useLazyLoadQuery` or `useFragment`) in a descendant of the provider uses the environment that the provider sets.
 
-```tsx
-import {RelayEnvironmentProvider} from 'react-relay';
-import {environment} from './relay/environment';
+```js
+const React = require('React');
+const {
+  Store,
+  RecordSource,
+  Environment,
+  Network,
+  Observable,
+} = require("relay-runtime");
 
-export function Root() {
+const {RelayEnvironmentProvider} = require('react-relay');
+
+function fetchFunction(params, variables) {
+  const response = fetch("http://my-graphql/api", {
+    method: "POST",
+    headers: [["Content-Type", "application/json"]],
+    body: JSON.stringify({
+      query: params.text,
+      variables,
+    }),
+  });
+
+  return Observable.from(response.then((data) => data.json()));
+};
+
+function createEnvironment() {
+  const network = Network.create(fetchFunction);
+  const store = new Store(new RecordSource());
+  return new Environment({ store, network });
+}
+
+const environment = createEnvironment();
+
+function Root() {
   return (
     <RelayEnvironmentProvider environment={environment}>
       <App />
     </RelayEnvironmentProvider>
   );
 }
+
+module.exports = Root;
 ```
 
 Props:
 
-| Prop | Type | Notes |
-| --- | --- | --- |
-| `environment` | `IEnvironment` | Required. Swapping the instance re-renders all consumers — typically stable for the app lifetime. |
-| `children` | `ReactNode` | |
-
-Multiple providers can be nested (e.g. per-tenant environment) — the nearest ancestor wins.
+| Prop | Notes |
+| --- | --- |
+| `environment` | The Relay environment to set in React Context. |
 
 ## 10. useRelayEnvironment
 
-```ts
-import {useRelayEnvironment} from 'react-relay';
+`useRelayEnvironment` accesses a Relay environment that a `RelayEnvironmentProvider` set.
 
-function PrefetchButton({id}: {id: string}) {
-  const env = useRelayEnvironment();
-  return (
-    <button onClick={() => fetchQuery(env, UserQuery, {id}).subscribe({})}>
-      Prefetch
-    </button>
+```js
+const React = require('React');
+
+const {useRelayEnvironment} = require('react-relay');
+
+function MyComponent() {
+  const environment = useRelayEnvironment();
+
+  const handler = useCallback(() => {
+    // For example, can be used to pass the environment to functions
+    // that require a Relay environment.
+    commitMutation(environment, ...);
+  }, [environment])
+
+  return (...);
+}
+
+module.exports = MyComponent;
+```
+
+## 11. Field logger events
+
+Source: docs `api-reference/relay-runtime/field-logger`; types in `store/RelayStoreTypes.js` (same in v20.1.1 and v21.0.1).
+
+`relayFieldLogger` receives one event each time Relay handles a field-level error. Every event has `owner` (the fragment, query, or mutation name) and `fieldPath` (`.`-separated path from the owner to the field). Events that can throw also carry `handled`; throw your own error only when `handled` is `false`. A `@catch` directive or a nullable resolver sets `handled` to `true`.
+
+| `kind` | Raised when | Extra fields |
+| --- | --- | --- |
+| `missing_expected_data.log` | Data that the operation requested is absent from the store. The field reads as `undefined`. | none |
+| `missing_expected_data.throw` | Same, inside a `@throwOnFieldError` operation. Relay throws after the logger returns. | `handled` |
+| `missing_required_field.log` | A `@required(action: LOG)` field is `null` or missing. | none |
+| `missing_required_field.throw` | A `@required(action: THROW)` field is `null` or missing. | `handled` |
+| `relay_resolver.error` | A Relay Resolver threw. Relay coerces the value to `null`. | `error`, `shouldThrow`, `handled` |
+| `relay_field_payload.error` | The GraphQL response marked the field as an error. | `error`, `shouldThrow`, `handled` |
+
+For `missing_expected_data`, `fieldPath` can end in `<record>` (an edge points to an ID that the store lacks) or `<abstract-type-hint>` (the compiler's virtual type-check field is missing).
+
+## 12. `readInlineData`
+
+The hooks APIs read data from the store only during the render phase. To read data outside the render phase, or outside React, annotate a fragment with `@inline` and read it with `readInlineData`.
+
+```javascript
+import {graphql, readInlineData} from 'react-relay';
+
+// non-React function called from React
+function processItemData(itemRef) {
+  const item = readInlineData(
+    graphql`
+      fragment processItemData_item on Item @inline {
+        title
+        price
+        creator {
+          name
+        }
+      }
+    `,
+    itemRef,
   );
+  sendToThirdPartyApi({
+    title: item.title,
+    price: item.price,
+    creatorName: item.creator.name,
+  });
 }
 ```
 
-Returns the nearest `IEnvironment`. Throws if no provider is above the caller. Safe to call conditionally **within** a component (it's a context read), but follow the normal hooks rules.
+Details of `@inline`: see `directives.md`.
 
-## 11. When to use imperative APIs vs hooks
+## 13. `observeFragment` and `waitForFragmentData` (experimental)
 
-Prefer hooks for anything rendered. Reach for the runtime APIs only when:
+Both functions read a fragment outside React. The docs mark both as experimental. They exist in v20.1.x and in v21.0.1 (`store/observeFragmentExperimental.js`, `store/waitForFragmentExperimental.js`; the v20 and v21 docs describe them in the same words). Import them from `relay-runtime/experimental`.
 
-- **Prefetching on intent** — `onMouseEnter`, router `preload`, service worker — before a component mounts.
-- **Outside React** — Redux middleware, state machines, workers, CLI/SSR scripts.
-- **Side-effect orchestration** — fire-and-forget telemetry writes, cache warming, background sync.
-- **Store manipulation** — client state via `commitLocalUpdate`, updater functions inside mutations/subscriptions.
-- **SSR** — construct a per-request `Environment`, fetch, serialize `store.getSource().toJSON()`.
-- **Testing** — `createMockEnvironment()` plus direct `commitPayload` / `mock.resolveMostRecentOperation`.
+Both take `environment` as the first argument. The source signature is `(environment, fragment, fragmentRef)`. The docs examples omit `environment` and read `result.kind`. The source reads `state`, so write `result.state`.
 
-If a component needs the data, still render via `usePreloadedQuery` / `useFragment`; imperative fetches should feed the same store the hooks read.
+```ts
+import {observeFragment} from "relay-runtime/experimental";
 
-## 12. Hook vs imperative equivalent
+const subscription = observeFragment(
+  graphql`
+    fragment TitleFragment on User {
+      name
+    }
+  `,
+  user,
+).subscribe({
+  next: (result) => {
+    switch(result.kind) {
+      case "loading":
+        window.title = "...loading";
+        break;
+      case "error":
+        window.title = "Oops, we hit an error";
+        break;
+      case "ok":
+        window.title = `Welcome ${result.value.name}`;
+        break;
+    }
+  }
+});
+subscription.unsubscribe();
+```
 
-| Hook (React) | Imperative equivalent (runtime) |
-| --- | --- |
-| `useLazyLoadQuery(query, vars)` | `fetchQuery(env, query, vars).subscribe(...)` + `environment.retain(op)` |
-| `usePreloadedQuery(query, ref)` | `loadQuery(env, query, vars)` — produces the ref imperatively |
-| `useQueryLoader(query)` | `loadQuery` / manual `Disposable` tracking |
-| `useFragment(fragment, ref)` | `environment.lookup(selector)` + `environment.subscribe(snapshot, cb)` |
-| `usePaginationFragment` | `ConnectionHandler` edits + manual `fetchQuery` with pagination vars |
-| `useMutation(mutation)` | `commitMutation(env, config)` |
-| `useSubscription(config)` | `requestSubscription(env, config)` |
-| `useRelayEnvironment()` | Pass `environment` explicitly |
-| `commitLocalUpdate` (no hook) | `commitLocalUpdate(env, updater)` |
-| `useClientQuery` | `fetchQuery` against a query containing only client fields |
-| `useRefetchableFragment` | `fetchQuery` with refetch variables + `ConnectionHandler` reconciliation |
+```tsx
+import { waitForFragmentData } from "relay-runtime/experimental";
+
+const userData = await waitForFragmentData(
+  graphql`
+    fragment EventHandlerFragment on User {
+      age
+    }
+  `,
+  user,
+);
+```
+
+| Function | Returns | States and behavior |
+| --- | --- | --- |
+| `observeFragment` | `Observable` | `{state: 'ok', value: T}`: data is available. `{state: 'error', error}`: network errors, `@throwOnFieldError`, or `@required(action: THROW)` field errors. `{state: 'loading'}`: the parent request or the current `@defer` payload is in flight, or a `@live` resolver is suspended. Emits again as the data changes. |
+| `waitForFragmentData` | `Promise<T>` | Waits for network data and for `@live` resolvers to leave the suspended state. Rejects on a network error, `@throwOnFieldError`, or `@required(action: THROW)` field errors. |
+
+With a plural fragment, `observeFragment` can notify the subscription several times, synchronously, for one store update that touches several list items. Debounce for one tick and use the last payload.
+
+Known limits: a fragment with client edges throws `Client edges aren't supported yet.` in v20; v21 accepts them only when the fragment uses exec-time resolvers.

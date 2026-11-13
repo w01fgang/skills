@@ -1,643 +1,695 @@
 # Testing Relay
 
-Reference for testing Relay (hooks-only) components with Jest and React Testing Library using `relay-test-utils`. Covers mock environments, `MockPayloadGenerator`, operation resolution, fragments, mutations, pagination, subscriptions, and preloaded queries.
+Reference for testing Relay components with the APIs from `relay-test-utils`. It covers the mock environment, `MockPayloadGenerator`, the `@relay_test_operation` directive, resolving operations, fragments, mutations, pagination, subscriptions and preloaded queries.
 
-## Install
+The content focuses on jest unit tests (individual components) and integration tests (a combination of components). Treat jest tests as one part of a bigger stability infrastructure with multiple layers of automated testing: flow, e2e, screenshot, "Redbox" and performance tests.
 
-```bash
-npm install --save-dev relay-test-utils @testing-library/react @testing-library/jest-dom jest
-```
+## Testing with Relay
 
-`relay-test-utils` ships with the `relay` package family and works with any React Relay version that supports hooks.
+Testing applications that use Relay can be hard, because of the additional data fetching layer that wraps the product code. Relay provides tools that simplify the tests for Relay components: imperative APIs that control the request/response flow, and an API for mock data generation.
 
-## Core APIs
+There are two main Relay modules for your tests:
 
-Two exports from `relay-test-utils`:
+- `createMockEnvironment(options): RelayMockEnvironment`
+- `MockPayloadGenerator` and the `@relay_test_operation` directive
 
-- `createMockEnvironment()` — returns a `RelayMockEnvironment` (an `Environment` plus a `.mock` controller).
-- `MockPayloadGenerator` — synthesizes payloads from an operation descriptor.
+`createMockEnvironment` creates an instance of `RelayMockEnvironment`, a Relay environment for tests. The instance implements the Relay Environment Interface and has an additional Mock layer. The methods of this layer resolve, reject and control the flow of operations (queries, mutations, subscriptions).
 
-The `.mock` controller on the environment exposes:
+`MockPayloadGenerator` improves the creation and maintenance of mock data for tested components. Without it, most of the test code is test preparation: a large, manually created mock object with dummy data or a copy of a sample server response. With `MockPayloadGenerator` and `@relay_test_operation`, the focus of the developer moves from the preparation of the test to the actual testing.
+
+[React Testing Library](https://testing-library.com/react) is a set of helpers that let you test React components without relying on their implementation details. A test runner like Jest can [mock modules](https://reactjs.org/docs/testing-recipes.html#mocking-modules) to render a component without its children.
+
+## `RelayMockEnvironment` API overview
+
+`RelayMockEnvironment` is a special version of the Relay Environment with additional API methods. They control the operation flow: resolving and rejecting operations, providing incremental payloads for subscriptions, and working with the cache.
+
+Methods for finding operations that were executed on the environment:
 
 | Method | Purpose |
 |---|---|
-| `getAllOperations()` | Every pending operation in order. |
-| `getMostRecentOperation()` | Latest pending operation (throws if none). |
-| `findOperation(fn)` | First operation matching predicate (throws if none). |
-| `resolveMostRecentOperation(op => payload)` | Resolve latest with generated data. |
-| `rejectMostRecentOperation(error \| op => error)` | Fail latest with error. |
-| `nextValue(request, data)` | Emit payload without completing (subscriptions, `@stream`). |
-| `complete(request)` | Complete a request previously fed with `nextValue`. |
-| `resolve(request, data)` | `nextValue` + `complete`. |
-| `reject(request, error)` | Fail a specific request. |
-| `queueOperationResolver(resolver)` | Auto-resolve subsequent operations. |
-| `queuePendingOperation(query, variables)` | Pre-seed an operation so `usePreloadedQuery` will not suspend indefinitely. |
-| `isLoading(request)` | `true` if pending. |
-| `cachePayload(request, vars, payload)` | Seed the QueryResponse cache. |
-| `clearCache()` | Reset cache. |
+| `getAllOperations()` | Get all operations executed during the test by the current time. |
+| `findOperation(findFn => boolean)` | Find a particular operation in the list of all executed operations. Throws if the operation is not available. Useful when multiple operations execute at the same time. |
+| `getMostRecentOperation()` | Return the most recent operation. Throws if no operation was executed before the call. |
 
-## Enabling `@relay_test_operation`
+Methods for resolving or rejecting operations:
 
-Add the `@relay_test_operation` directive to test-only queries. It instructs the compiler to emit type metadata that `MockPayloadGenerator` needs for scalar and abstract-type mocking.
+| Method | Purpose |
+|---|---|
+| `nextValue(request \| operation, data)` | Provide a payload for the operation, but do not complete the request. Useful for incremental updates and subscriptions. |
+| `complete(request \| operation)` | Complete the operation. No more payloads are expected for it. |
+| `resolve(request \| operation, data)` | Resolve the request with the provided GraphQL response. Equal to `nextValue(...)` and `complete(...)`. |
+| `reject(request \| operation, error)` | Reject the request with a particular error. |
+| `resolveMostRecentOperation(operation => data)` | Resolve the most recent operation (`resolve` and `getMostRecentOperation` together). |
+| `rejectMostRecentOperation(operation => error)` | Reject the most recent operation (`reject` and `getMostRecentOperation` together). |
+| `queueOperationResolver(operation => data \| error)` | Add an OperationResolver function to the queue. Relay uses the resolver to resolve or reject operations as they appear. |
+| `queuePendingOperation(query, variables)` | Record a pending operation, so that the `usePreloadedQuery` hook does not suspend. |
 
-```ts
-const testQuery = graphql`
-  query UserTestQuery($id: ID!) @relay_test_operation {
-    node(id: $id) {
-      ... on User {
-        ...UserCard_user
-      }
-    }
-  }
-`;
-```
+Additional utility methods:
 
-Without the directive, resolvers by type still work for concrete object types but scalar resolution loses field context.
+| Method | Purpose |
+|---|---|
+| `isLoading(request \| operation)` | Return `true` if the operation is not completed yet. |
+| `cachePayload(request \| operation, variables, payload)` | Add a payload to the QueryResponse cache. |
+| `clearCache()` | Clear the QueryResponse cache. |
 
-## `createMockEnvironment()`
+For `usePreloadedQuery` to not suspend, call these functions:
 
-```ts
-import { createMockEnvironment, MockPayloadGenerator } from 'relay-test-utils';
-import { RelayEnvironmentProvider } from 'react-relay';
+- `queueOperationResolver(resolver)`
+- `queuePendingOperation(query, variables)`
+- `preloadQuery(mockEnvironment, query, variables)` with the same `query` and `variables` as in `queuePendingOperation`. `preloadQuery` must be called after `queuePendingOperation`.
 
-const environment = createMockEnvironment();
+The `preloadQuery` name comes from the v21 guide. The `loadQuery` function of `react-relay` is the call that the hook-based API uses.
 
-render(
-  <RelayEnvironmentProvider environment={environment}>
-    <MyComponent />
-  </RelayEnvironmentProvider>
-);
-```
+## Mock Payload Generator and the `@relay_test_operation` directive
 
-Create a fresh environment per test. Sharing state across tests causes cache bleed and stale operations.
+`MockPayloadGenerator` generates dummy data for the selection in your operation. Mock Resolvers adjust the generated data. A Mock Resolver set is an object whose keys are names of GraphQL types (`ID`, `String`, `User`, `Comment`, etc) and whose values are functions that return the default data for the type.
 
-```ts
-let environment: ReturnType<typeof createMockEnvironment>;
-beforeEach(() => {
-  environment = createMockEnvironment();
-});
-```
+A simple Mock Resolver:
 
-## `MockPayloadGenerator.generate(operation, mockResolvers?)`
-
-Generates a payload matching the operation's selection set. Second arg is a map from GraphQL type name to a resolver function.
-
-```ts
-environment.mock.resolveMostRecentOperation(operation =>
-  MockPayloadGenerator.generate(operation)
-);
-```
-
-With resolvers:
-
-```ts
-environment.mock.resolveMostRecentOperation(operation =>
-  MockPayloadGenerator.generate(operation, {
-    User: () => ({ id: 'u_1', name: 'Alice', email: 'alice@example.com' }),
-    String: () => 'mock-string',
-    ID: (_, gen) => `id-${gen()}`,
-    Int: () => 42,
-  })
-);
-```
-
-Resolvers may return partial objects; unspecified fields are synthesized from the schema.
-
-## Mocking by Type
-
-Keys are GraphQL type names (`User`, `Post`, `CurrencyAmount`, `String`, `Int`, `ID`, `Float`, `Boolean`, and abstract types like `Node` if the query uses them abstractly).
-
-```ts
-MockPayloadGenerator.generate(operation, {
-  User: () => ({ name: 'Alice', __typename: 'User' }),
-  Organization: () => ({ name: 'Acme', membersCount: 12 }),
-  PageInfo: () => ({ hasNextPage: false, endCursor: null }),
-});
-```
-
-A resolver for a type applies wherever that type appears in the selection set.
-
-## Path-Aware Mocks with `context`
-
-Resolvers receive `(context, generateId)`. `context` has:
-
-- `context.name` — field or alias name (e.g. `"name"`, `"firstEdge"`).
-- `context.path` — array of field names from the root (e.g. `['node', 'actor', 'name']`).
-- `context.parentType` — containing GraphQL type.
-- `context.args` — the field's arguments at call site.
-
-```ts
-MockPayloadGenerator.generate(operation, {
-  String: (context) => {
-    if (context.path?.join('.') === 'node.actor.name') return 'Alice';
-    if (context.name === 'url') return 'https://example.com';
-    return `mock-${context.name}`;
+```js
+{
+  ID() {
+    // Return mock value for a scalar filed with type ID
+    return 'my-id';
   },
-  ID: (_, generateId) => `id-${generateId()}`,
-  Boolean: (context) => context.name === 'isActive',
-});
-```
-
-`generateId()` returns a monotonically increasing integer per test run — useful for unique IDs without collisions.
-
-## Resolving Operations
-
-### `resolveMostRecentOperation`
-
-```ts
-environment.mock.resolveMostRecentOperation(operation =>
-  MockPayloadGenerator.generate(operation, {
-    User: () => ({ name: 'Alice' }),
-  })
-);
-```
-
-Wrap in `act()` when the resolution triggers a React re-render:
-
-```ts
-import { act } from '@testing-library/react';
-
-act(() => {
-  environment.mock.resolveMostRecentOperation(op =>
-    MockPayloadGenerator.generate(op)
-  );
-});
-```
-
-### `rejectMostRecentOperation`
-
-```ts
-environment.mock.rejectMostRecentOperation(new Error('Network failure'));
-```
-
-Or functional form:
-
-```ts
-environment.mock.rejectMostRecentOperation(op =>
-  new Error(`Failed for ${op.fragment.node.name}`)
-);
-```
-
-### `queueOperationResolver` (auto-resolve)
-
-Register a resolver that fires for each operation as it is sent:
-
-```ts
-environment.mock.queueOperationResolver(operation =>
-  MockPayloadGenerator.generate(operation, {
-    User: () => ({ name: 'Alice' }),
-  })
-);
-```
-
-Unlike `resolveMostRecentOperation`, no manual resolve call is needed after render. Essential for preloaded queries (see below).
-
-### `getAllOperations`
-
-Inspect every pending operation — useful when multiple queries fire:
-
-```ts
-const ops = environment.mock.getAllOperations();
-expect(ops).toHaveLength(2);
-expect(ops[0].fragment.node.name).toBe('UserListQuery');
-```
-
-## Testing a Component with `useLazyLoadQuery`
-
-```tsx
-// UserCard.tsx
-import { graphql, useLazyLoadQuery } from 'react-relay';
-
-const query = graphql`
-  query UserCardQuery($id: ID!) {
-    user: node(id: $id) {
-      ... on User {
-        name
-        email
-      }
-    }
+  String() {
+    // Every scalar field with type String will have this default value
+    return "Lorem Ipsum"
   }
-`;
-
-export function UserCard({ id }: { id: string }) {
-  const data = useLazyLoadQuery<UserCardQuery>(query, { id });
-  return <div>{data.user?.name}</div>;
 }
 ```
 
-```tsx
-// UserCard.test.tsx
-import { Suspense } from 'react';
-import { render, screen, act } from '@testing-library/react';
-import { RelayEnvironmentProvider } from 'react-relay';
-import { createMockEnvironment, MockPayloadGenerator } from 'relay-test-utils';
-import { UserCard } from './UserCard';
+Resolvers for Object types:
 
-test('renders user name', async () => {
+```js
+{
+  // This will be the default values for User object in the query response
+  User() {
+    return {
+      id: 4,
+      name: "Mark",
+      profile_picture: {
+        uri: "http://my-image...",
+      },
+    };
+  },
+}
+```
+
+### Mock Resolver Context
+
+The first argument of a Mock Resolver is an object that contains the Mock Resolver Context. A resolver can return dynamic values based on the context: the name or alias of the field, a path in the selection, arguments, or the parent type.
+
+```js
+{
+  String(context) {
+    if (context.name === 'zip') {
+      return '94025';
+    }
+    if (context.path != null && context.path.join('.') === 'node.actor.name') {
+      return 'Current Actor Name';
+    }
+    if (context.parentType === 'Image' && context.name === 'uri') {
+       return 'http://my-image.url';
+    }
+  }
+}
+```
+
+### ID generation
+
+The second argument of a Mock Resolver is a function that generates a sequence of integers. Use it to generate unique ids in tests.
+
+```js
+{
+  // will generate strings "my-id-1", "my-id-2", etc.
+  ID(_, generateId) {
+     return `my-id-${generateId()}`;
+  },
+}
+```
+
+### Float, Integer, Boolean, etc.
+
+For production queries, Relay has no full type information for scalar fields like Boolean, Integer and Float. In Mock Resolvers they map to String. Use `context` to adjust return values based on the field name, alias, etc.
+
+### `@relay_test_operation`
+
+Most of the GraphQL type information for a field in the selection is not available at Relay runtime. By default, Relay cannot get type information for a scalar field in the selection or for an interface type of the object.
+
+An operation with the `@relay_test_operation` directive has additional metadata with GraphQL type information for the fields in the selection of the operation. This improves the quality of the generated data. You can then define Mock Resolvers for Scalar (other than ID and String) and Abstract types:
+
+```javascript
+{
+  Float() {
+    return 123.456;
+  },
+  Boolean(context) {
+    if (context.name === 'can_edit') {
+      return true;
+    }
+    return false;
+  },
+  Node() {
+    return {
+      __typename: 'User',
+      id: 'my-user-id',
+    };
+  }
+}
+```
+
+## Examples
+
+### Relay component test
+
+`createMockEnvironment` and `MockPayloadGenerator` allow concise tests for components that use Relay hooks. Import both from `relay-test-utils`.
+
+Relay can trigger 3 states for a component: Loading, Error and Data Loaded. Wrap the resolution in `act` so that components are fully updated to their final state. Simulate an error with `rejectMostRecentOperation`.
+
+```javascript
+// Say you have a component with the useLazyLoadQuery or a QueryRenderer
+const MyAwesomeViewRoot = require('MyAwesomeViewRoot');
+const {
+  createMockEnvironment,
+  MockPayloadGenerator,
+} = require('relay-test-utils');
+const {act, render} = require('@testing-library/react');
+
+// Relay may trigger 3 different states
+// for this component: Loading, Error, Data Loaded
+// Here is examples of tests for those states.
+test('Loading State', async () => {
   const environment = createMockEnvironment();
-
-  render(
-    <RelayEnvironmentProvider environment={environment}>
-      <Suspense fallback={<div>Loading...</div>}>
-        <UserCard id="u_1" />
-      </Suspense>
-    </RelayEnvironmentProvider>
+  const renderer = render(
+    <MyAwesomeViewRoot environment={environment} />,
   );
 
-  expect(screen.getByText('Loading...')).toBeInTheDocument();
+  // Here we just verify that the spinner is rendered
+  expect(await renderer.findByTestId('spinner')).toBeDefined();
+});
 
+test('Data Render', async () => {
+  const environment = createMockEnvironment();
+  const renderer = render(
+    <MyAwesomeViewRoot environment={environment} />,
+  );
+
+  // Wrapping in act will ensure that components
+  // are fully updated to their final state.
   act(() => {
-    environment.mock.resolveMostRecentOperation(op =>
-      MockPayloadGenerator.generate(op, {
-        User: () => ({ name: 'Alice', email: 'alice@example.com' }),
-      })
+    environment.mock.resolveMostRecentOperation(operation =>
+      MockPayloadGenerator.generate(operation),
     );
   });
 
-  expect(await screen.findByText('Alice')).toBeInTheDocument();
+  // At this point operation will be resolved
+  // and the data for a query will be available in the store
+  expect(await renderer.findByTestId('myButton')).toBeDefined();
+});
+
+test('Error State', async () => {
+  const environment = createMockEnvironment();
+  const renderer = render(
+    <MyAwesomeViewRoot environment={environment} />,
+  );
+
+  // Wrapping in act will ensure that components
+  // are fully updated to their final state.
+  act(() => {
+    // Error can be simulated with `rejectMostRecentOperation`
+    environment.mock.rejectMostRecentOperation(new Error('Uh-oh'));
+  });
+
+  expect(await renderer.findByTestId('errorMessage')).toBeDefined();
 });
 ```
 
-## Testing Fragments in Isolation
+#### Component tests with deferred fragments
 
-Fragments cannot render alone — wrap them in a test query that spreads the fragment.
+When a query has fragments with `@defer`, use `MockPayloadGenerator.generateWithDefer` with the option `generateDeferredPayload` to generate the deferred data as well:
 
-```tsx
-// UserAvatar.tsx
-import { graphql, useFragment } from 'react-relay';
-
-const fragment = graphql`
-  fragment UserAvatar_user on User {
+```javascript
+// Say you have a component with useFragment
+const ChildComponent = (props: {user: ChildComponentFragment_user$key}) => {
+  const data = useFragment(graphql`
+  fragment ChildComponentFragment_user on User {
     name
-    avatarUrl
   }
-`;
+  `, props.user);
+  return <View>{data?.name}</View>;
+};
 
-export function UserAvatar({ userRef }: { userRef: UserAvatar_user$key }) {
-  const user = useFragment(fragment, userRef);
-  return <img alt={user.name} src={user.avatarUrl} />;
-}
+// Say you have a parent component that fetches data with useLazyLoadQuery and `@defer`s the data for the ChildComponent.
+const ParentComponent = () => {
+  const data = useLazyLoadQuery(graphql`
+  query ParentComponentQuery {
+    user {
+      id
+      ...ChildComponentFragment_user @defer
+    }
+  }
+  `, {});
+  return (
+    <View>
+      {id}
+      <Suspense fallback={null}>
+        {data?.user && <ChildComponent user={data.user} />}
+      </Suspense>
+    </View>
+  );
+};
+
+const {
+  createMockEnvironment,
+  MockPayloadGenerator,
+} = require('relay-test-utils');
+const {act, render} = require('@testing-library/react');
+
+test('Data Render with @defer', () => {
+  const environment = createMockEnvironment();
+  const renderer = render(
+    <RelayEnvironmentProvider environment={environment}>
+      <ParentComponent />,
+    </RelayEnvironmentProvider>
+  );
+
+  // Wrapping in ReactTestRenderer.act will ensure that components
+  // are fully updated to their final state.
+  act(() => {
+    const operation = environment.mock.getMostRecentOperation();
+    const mockData = MockPayloadGenerator.generateWithDefer(operation, null, {generateDeferredPayload: true});
+    environment.mock.resolve(mockData);
+
+    // You may need this to make sure all payloads are retrieved
+    jest.runAllTimers();
+  });
+
+  // At this point operation will be resolved
+  // and the data for a query will be available in the store
+  expect(renderer.container.textContent).toEqual(['id', 'name']);
+});
 ```
 
-```tsx
-// UserAvatar.test.tsx
-import { graphql, useLazyLoadQuery } from 'react-relay';
+Pass the operation as the first argument of `environment.mock.resolve`. The v21 guide example calls `environment.mock.resolve(mockData)` with one argument, which does not match the source signature.
 
-function Harness() {
-  const data = useLazyLoadQuery<UserAvatarTestQuery>(
-    graphql`
-      query UserAvatarTestQuery @relay_test_operation {
-        user: node(id: "test") {
-          ... on User {
-            ...UserAvatar_user
+### Fragment component tests
+
+`resolveMostRecentOperation` generates data for all child fragment containers (pagination, refetch). A root component can have many child fragment components. To exercise one component that uses `useFragment`, wrap it with a `useLazyLoadQuery` component that renders a Query that spreads the fragments from your fragment component:
+
+```javascript
+test('Fragment', () => {
+  const environment = createMockEnvironment();
+  const TestRenderer = () => {
+    const data = useLazyLoadQuery(
+      graphql`
+        query TestQuery @relay_test_operation {
+          myData: node(id: "test-id") {
+            # Spread the fragment you want to test here
+            ...MyFragment
           }
         }
-      }
-    `,
-    {}
-  );
-  return data.user ? <UserAvatar userRef={data.user} /> : null;
-}
+      `,
+      {},
+    );
+    return <MyFragmentComponent myData={data.myData} />
+  };
 
-test('renders avatar from fragment', () => {
-  const environment = createMockEnvironment();
-  render(
+  const renderer = render(
     <RelayEnvironmentProvider environment={environment}>
-      <Suspense fallback={null}>
-        <Harness />
+      <Suspense fallback="Loading...">
+        <TestRenderer />
+      </Suspense>
+    </RelayEnvironmentProvider>
+  );
+
+  // Wrapping in act will ensure that components
+  // are fully updated to their final state.
+  act(() => {
+    environment.mock.resolveMostRecentOperation(operation =>
+      MockPayloadGenerator.generate(operation),
+    );
+  });
+
+  expect(renderer).toMatchSnapshot();
+});
+```
+
+### Pagination component test
+
+Tests for pagination components (for example with `usePaginationFragment`) are like fragment component tests. You can also assert the behavior of the component when it paginates (load more, refetch).
+
+```js
+// Pagination Example
+test('`Pagination` Container', async () => {
+  const environment = createMockEnvironment();
+  const TestRenderer = () => {
+    const data = useLazyLoadQuery(
+      graphql`
+        query TestQuery @relay_test_operation {
+          myConnection: node(id: "test-id") {
+            connection {
+              # Spread the pagination fragment you want to test here
+              ...MyConnectionFragment
+            }
+          }
+        }
+      `,
+      {},
+    );
+    return <MyPaginationContainer connection={data.myConnection.connection} />
+  };
+
+  const renderer = render(
+    <RelayEnvironmentProvider environment={environment}>
+      <Suspense fallback="Loading...">
+        <TestRenderer />
+      </Suspense>
+    </RelayEnvironmentProvider>
+  );
+
+  // Wrapping in act will ensure that components
+  // are fully updated to their final state.
+  act(() => {
+    environment.mock.resolveMostRecentOperation(operation =>
+      MockPayloadGenerator.generate(operation, {
+        ID(_, generateId) {
+          // Why we're doing this?
+          // To make sure that we will generate a different set of ID
+          // for elements on first page and the second page.
+          return `first-page-id-${generateId()}`;
+        },
+        PageInfo() {
+          return {
+            has_next_page: true,
+          };
+        },
+      }),
+    );
+  });
+
+  // Let's find a `loadMore` button and click on it to initiate pagination request, for example
+  const loadMore = await renderer.findByTestId('loadMore');
+  expect(loadMore.props.disabled).toBe(false);
+  loadMore.props.onClick();
+
+  // Wrapping in act will ensure that components
+  // are fully updated to their final state.
+  act(() => {
+    environment.mock.resolveMostRecentOperation(operation =>
+      MockPayloadGenerator.generate(operation, {
+        ID(_, generateId) {
+          // See, the second page IDs will be different
+          return `second-page-id-${generateId()}`;
+        },
+        PageInfo() {
+          return {
+            // And the button should be disabled, now. Probably.
+            has_next_page: false,
+          };
+        },
+      }),
+    );
+  });
+
+  expect(loadMore.props.disabled).toBe(true);
+});
+```
+
+### Refetch component
+
+Wrap the component with a query in the same way:
+
+```js
+test('Refetch Container', async () => {
+  const environment = createMockEnvironment();
+  const TestRenderer = () => {
+    const data = useLazyLoadQuery(
+      graphql`
+        query TestQuery @relay_test_operation {
+          myData: node(id: "test-id") {
+            # Spread the pagination fragment you want to test here
+            ...MyRefetchableFragment
+          }
+        }
+      `,
+      {},
+    );
+    return <MyRefetchContainer data={data.myData} />
+  };
+
+  const renderer = render(
+    <RelayEnvironmentProvider environment={environment}>
+      <Suspense fallback="Loading...">
+        <TestRenderer />
       </Suspense>
     </RelayEnvironmentProvider>
   );
 
   act(() => {
-    environment.mock.resolveMostRecentOperation(op =>
-      MockPayloadGenerator.generate(op, {
-        User: () => ({ name: 'Alice', avatarUrl: 'https://x/y.png' }),
-      })
+    environment.mock.resolveMostRecentOperation(operation =>
+      MockPayloadGenerator.generate(operation),
     );
   });
 
-  expect(screen.getByAltText('Alice')).toHaveAttribute(
-    'src',
-    'https://x/y.png'
-  );
+  // Assuming we have refetch button in the Container
+  const refetchButton = await renderer.findByTestId('refetch');
+
+  // This should trigger the `refetch`
+  refetchButton.props.onClick();
+
+  act(() => {
+    environment.mock.resolveMostRecentOperation(operation =>
+      MockPayloadGenerator.generate(operation, {
+        // We can customize mock resolvers, to change the output of the refetch query
+      }),
+    );
+  });
+
+  expect(renderer).toMatchSnapshot();
 });
 ```
 
-## Testing Preloaded Queries
+### Mutations
 
-`usePreloadedQuery` requires both an auto-resolver and a pending operation, because the query reference is created before render.
+Mutations are operations. Test a specific mutation independently (unit test), or in combination with the view that calls it. The `useMutation` API is an improvement over calling `commitMutation` directly.
 
-```tsx
-// UserProfile.tsx
-import { graphql, usePreloadedQuery, PreloadedQuery } from 'react-relay';
-
-export const userProfileQuery = graphql`
-  query UserProfileQuery($id: ID!) {
-    node(id: $id) {
-      ... on User {
-        name
-      }
-    }
-  }
-`;
-
-export function UserProfile({
-  queryRef,
-}: {
-  queryRef: PreloadedQuery<UserProfileQuery>;
-}) {
-  const data = usePreloadedQuery(userProfileQuery, queryRef);
-  return <div>{data.node?.name}</div>;
+```js
+// Say, you have a mutation function
+function sendMutation(environment, onCompleted, onError, variables)
+  commitMutation(environment, {
+    mutation: graphql`...`,
+    onCompleted,
+    onError,
+    variables,
+  });
 }
-```
 
-```tsx
-// UserProfile.test.tsx
-import { loadQuery } from 'react-relay';
-import { userProfileQuery, UserProfile } from './UserProfile';
-
-test('renders preloaded profile', () => {
+// Example test may be written like so
+test('it should send mutation', () => {
   const environment = createMockEnvironment();
-
-  // 1. Register the auto-resolver BEFORE loadQuery.
-  environment.mock.queueOperationResolver(op =>
-    MockPayloadGenerator.generate(op, {
-      User: () => ({ name: 'Alice' }),
-    })
-  );
-
-  // 2. Mark the operation pending so usePreloadedQuery can find it.
-  environment.mock.queuePendingOperation(userProfileQuery, { id: 'u_1' });
-
-  // 3. Kick off the query.
-  const queryRef = loadQuery(environment, userProfileQuery, { id: 'u_1' });
-
-  render(
-    <RelayEnvironmentProvider environment={environment}>
-      <Suspense fallback={<div>Loading</div>}>
-        <UserProfile queryRef={queryRef} />
-      </Suspense>
-    </RelayEnvironmentProvider>
-  );
-
-  expect(screen.getByText('Alice')).toBeInTheDocument();
-});
-```
-
-Variables must match exactly. Arrays compare by order; objects compare deeply but ignore key order.
-
-If `loadQuery` is inside a `useEffect`, flush it with:
-
-```ts
-import { act } from '@testing-library/react';
-act(() => { jest.runAllImmediates(); });
-```
-
-## Testing Mutations
-
-Cover three paths: optimistic update, success, error.
-
-```tsx
-// LikeButton.tsx
-import { graphql, useMutation } from 'react-relay';
-
-const mutation = graphql`
-  mutation LikeButtonMutation($postId: ID!) {
-    likePost(postId: $postId) {
-      post { id likeCount viewerHasLiked }
-    }
-  }
-`;
-
-export function LikeButton({ postId, initialCount }: Props) {
-  const [commit, inFlight] = useMutation(mutation);
-  return (
-    <button
-      disabled={inFlight}
-      onClick={() =>
-        commit({
-          variables: { postId },
-          optimisticResponse: {
-            likePost: {
-              post: { id: postId, likeCount: initialCount + 1, viewerHasLiked: true },
-            },
-          },
-        })
-      }
-    >
-      Like
-    </button>
-  );
-}
-```
-
-### Success
-
-```tsx
-test('commits like mutation', async () => {
-  const environment = createMockEnvironment();
-  render(
-    <RelayEnvironmentProvider environment={environment}>
-      <LikeButton postId="p_1" initialCount={4} />
-    </RelayEnvironmentProvider>
-  );
-
-  fireEvent.click(screen.getByRole('button', { name: /like/i }));
-
-  const operation = environment.mock.getMostRecentOperation();
-  expect(operation.fragment.variables).toEqual({ postId: 'p_1' });
-
-  act(() => {
-    environment.mock.resolve(operation, MockPayloadGenerator.generate(operation, {
-      Post: () => ({ id: 'p_1', likeCount: 5, viewerHasLiked: true }),
-    }));
-  });
-
-  expect(screen.getByRole('button')).not.toBeDisabled();
-});
-```
-
-### Optimistic
-
-Assert the optimistic state between click and resolve:
-
-```tsx
-fireEvent.click(screen.getByRole('button'));
-// Button is disabled and store shows optimistic count before the server responds.
-expect(screen.getByRole('button')).toBeDisabled();
-```
-
-### Error
-
-```tsx
-test('rolls back on error', () => {
-  const environment = createMockEnvironment();
-  render(/* ... */);
-  fireEvent.click(screen.getByRole('button'));
-
-  act(() => {
-    environment.mock.rejectMostRecentOperation(new Error('Boom'));
-  });
-
-  expect(screen.getByRole('button')).not.toBeDisabled();
-});
-```
-
-## Testing Pagination (`usePaginationFragment`)
-
-Each `loadNext()` fires a new operation. Drive the `pageInfo` via mock resolvers.
-
-```tsx
-test('loads next page', async () => {
-  const environment = createMockEnvironment();
-
-  render(
-    <RelayEnvironmentProvider environment={environment}>
-      <Suspense fallback={<div>Loading</div>}>
-        <FeedList />
-      </Suspense>
-    </RelayEnvironmentProvider>
-  );
-
-  // Initial page.
-  act(() => {
-    environment.mock.resolveMostRecentOperation(op =>
-      MockPayloadGenerator.generate(op, {
-        PageInfo: () => ({ hasNextPage: true, endCursor: 'c1' }),
-        ID: (_, g) => `post-${g()}`,
-      })
-    );
-  });
-
-  expect(screen.getAllByTestId('post')).toHaveLength(10);
-
-  fireEvent.click(screen.getByRole('button', { name: /load more/i }));
-
-  // Second page — new operation fires for the pagination query.
-  act(() => {
-    environment.mock.resolveMostRecentOperation(op =>
-      MockPayloadGenerator.generate(op, {
-        PageInfo: () => ({ hasNextPage: false, endCursor: 'c2' }),
-        ID: (_, g) => `post-${g() + 100}`,
-      })
-    );
-  });
-
-  expect(screen.getAllByTestId('post')).toHaveLength(20);
-});
-```
-
-Use different `generateId` offsets to avoid colliding record IDs across pages.
-
-## Testing Subscriptions
-
-Subscriptions emit multiple payloads. Use `nextValue` instead of `resolve`.
-
-```tsx
-test('receives subscription updates', () => {
-  const environment = createMockEnvironment();
-  render(
-    <RelayEnvironmentProvider environment={environment}>
-      <LivePrice symbol="AAPL" />
-    </RelayEnvironmentProvider>
-  );
-
+  const onCompleted = jest.fn();
+  sendMutation(environment, onCompleted, jest.fn(), {});
   const operation = environment.mock.getMostRecentOperation();
 
   act(() => {
-    environment.mock.nextValue(operation, MockPayloadGenerator.generate(operation, {
-      Float: () => 150.0,
-    }));
-  });
-  expect(screen.getByText('150')).toBeInTheDocument();
-
-  act(() => {
-    environment.mock.nextValue(operation, MockPayloadGenerator.generate(operation, {
-      Float: () => 151.5,
-    }));
-  });
-  expect(screen.getByText('151.5')).toBeInTheDocument();
-
-  act(() => { environment.mock.complete(operation); });
-});
-```
-
-## Full RTL Setup Example
-
-```tsx
-// test-utils.tsx
-import { ReactNode, Suspense } from 'react';
-import { render, RenderOptions } from '@testing-library/react';
-import { RelayEnvironmentProvider } from 'react-relay';
-import { createMockEnvironment } from 'relay-test-utils';
-import type { RelayMockEnvironment } from 'relay-test-utils/lib/RelayModernMockEnvironment';
-
-export function renderWithRelay(
-  ui: ReactNode,
-  options?: RenderOptions & { environment?: RelayMockEnvironment }
-) {
-  const environment = options?.environment ?? createMockEnvironment();
-  const utils = render(
-    <RelayEnvironmentProvider environment={environment}>
-      <Suspense fallback={<div data-testid="suspense">Loading</div>}>
-        {ui}
-      </Suspense>
-    </RelayEnvironmentProvider>,
-    options
-  );
-  return { environment, ...utils };
-}
-```
-
-```tsx
-// example.test.tsx
-import { screen, act } from '@testing-library/react';
-import { MockPayloadGenerator } from 'relay-test-utils';
-import { renderWithRelay } from './test-utils';
-import { UserCard } from './UserCard';
-
-test('UserCard renders', async () => {
-  const { environment } = renderWithRelay(<UserCard id="u_1" />);
-
-  act(() => {
-    environment.mock.resolveMostRecentOperation(op =>
-      MockPayloadGenerator.generate(op, {
-        User: () => ({ name: 'Alice' }),
-      })
+    environment.mock.resolve(
+      operation,
+      MockPayloadGenerator.generate(operation)
     );
   });
 
-  expect(await screen.findByText('Alice')).toBeInTheDocument();
+  expect(onCompleted).toBeCalled();
 });
 ```
 
-### `jest.config.ts`
+### Subscriptions
 
-```ts
-export default {
-  testEnvironment: 'jsdom',
-  setupFilesAfterEach: ['@testing-library/jest-dom'],
-  transform: { '^.+\\.tsx?$': ['ts-jest', { isolatedModules: true }] },
-};
+The `useSubscription` API is an improvement over calling `requestSubscription` directly. Test subscriptions in the same way as mutations.
+
+```js
+// Example subscribe function
+function subscribe(environment, onNext, onError, variables)
+  requestSubscription(environment, {
+    subscription: graphql`...`,
+    onNext,
+    onError,
+    variables,
+  });
+}
+
+// Example test may be written like so
+test('it should subscribe', () => {
+  const environment = createMockEnvironment();
+  const onNext = jest.fn();
+  subscribe(environment, onNext, jest.fn(), {});
+  const operation = environment.mock.getMostRecentOperation();
+
+  act(() => {
+    environment.mock.nextValue(
+      operation,
+      MockPayloadGenerator.generate(operation)
+    );
+  });
+
+  expect(onNext).toBeCalled();
+});
 ```
 
-Relay generates artifacts via `relay-compiler`. Run it before tests, or use `jest-transform-graphql` to compile on-the-fly.
+### Example with `queueOperationResolver`
+
+`queueOperationResolver` defines responses for operations that execute on the environment:
+
+```javascript
+// Say you have a component with the QueryRenderer
+const MyAwesomeViewRoot = require('MyAwesomeViewRoot');
+const {
+  createMockEnvironment,
+  MockPayloadGenerator,
+} = require('relay-test-utils');
+
+test('Data Render', async () => {
+  const environment = createMockEnvironment();
+  environment.mock.queueOperationResolver(operation =>
+    MockPayloadGenerator.generate(operation),
+  );
+
+  const renderer = render(
+    <MyAwesomeViewRoot environment={environment} />,
+  );
+
+  // At this point operation will be resolved
+  // and the data for a query will be available in the store
+  expect(await renderer.findByTestId('myButton')).toBeDefined();
+});
+
+test('Error State', async () => {
+  const environment = createMockEnvironment();
+  environment.mock.queueOperationResolver(() =>
+    new Error('Uh-oh'),
+  );
+  const renderer = render(
+    <MyAwesomeViewRoot environment={environment} />,
+  );
+
+  expect(await renderer.findByTestId('myButton')).toBeDefined();
+});
+```
+
+### With Relay Hooks
+
+The examples in this guide work for testing components with Relay Hooks, Containers or Renderers. For tests that involve the `usePreloadedQuery` hook, see "Testing preloaded queries" below.
+
+### `toMatchSnapshot(...)`
+
+The examples here use `toMatchSnapshot()` assertions to stay concise. `toMatchSnapshot()` is not the recommended way to test your components.
+
+## Testing preloaded queries
+
+Components that use preloaded queries (`useQueryLoader` and `usePreloadedQuery` hooks) need a slightly different and more convoluted test setup. Two steps are required **before rendering the component**:
+
+1. Configure the query resolver to generate the response with `environment.mock.queueOperationResolver`.
+2. Record a pending queue invocation with `environment.mock.queuePendingOperation`.
+
+Symptoms that something is wrong:
+
+1. The test does not do what you expect.
+2. The query seems to block and does not execute. For example, the `Suspense` does not switch from the "waiting" state to the "data loaded" state.
+3. With `console.log` before and after `usePreloadedQuery`, only the "before" call is hit.
+
+```javascript
+const {RelayEnvironmentProvider} = require('react-relay');
+const {MockPayloadGenerator, createMockEnvironment} = require('relay-test-utils');
+const {act, render} = require('@testing-library/react');
+test("...", () => {
+  // arrange
+  const environment = createMockEnvironment();
+  environment.mock.queueOperationResolver(operation => {
+      return MockPayloadGenerator.generate(operation, {
+        CurrencyAmount() {
+          return {
+            formatted_amount: "1234$",
+          };
+        },
+      });
+    });
+  const query = YourComponentGraphQLQueryGoesHere; // can be the same, or just identical
+  const variables = {
+    // ACTUAL variables for the invocation goes here
+  };
+  environment.mock.queuePendingOperation(YourComponentGraphQLQuery, variables);
+
+ // act
+  const {getByTestId, ..otherStuffYouMightNeed} = render(
+    <RelayEnvironmentProvider environment={environment}>
+        <YourComponent data-testid="1234" {...componentPropsIfAny}/>
+    </RelayEnvironmentProvider>
+  );
+  // trigger the loading - click a button, emit an event, etc. or ...
+  act(() => jest.runAllImmediates()); // ... if loadQuery is in the useEffect()
+  // assert
+  // your assertions go here
+});
+```
+
+### Configure the query resolver to generate the response
+
+Call `environment.mock.queueOperationResolver(operation)`. The resolver returns a mocked GraphQL result as a `MockResolvers` object. The keys of this object are the GraphQL types that you want to mock (see the Mock Payload Generator section above).
+
+```js
+return MockPayloadGenerator.generate(operation, {
+  CurrencyAmount() { // <-- the GraphQL type
+    return {
+      formatted_amount: "response_value" <-- CurrencyAmount fields, selected in the query
+    };
+  }
+});
+```
+
+To get the name of the GraphQL type and the fields to return, call `console.log(JSON.stringify(operation, null, 2))`. Look for the `concreteType` that corresponds to what you want to mock. The sibling `selections` array describes the fields that the query selects from that object.
+
+A resolver can return different data for different query variables with the Mock Resolver Context. The query variables are available on `context.args`, but only for the *innermost function call*.
+
+```javascript
+CurrencyAmount(context) {
+  console.log(JSON.stringify(context, null, 2)); // <--
+  return { formatted_amount: mockResponse }
+}
+// <-- logs { ...snip..., "name": "subtotal_price_for_offers", args: { offer_ids: [...] } }
+```
+
+### Record a pending queue invocation
+
+Call `environment.mock.queuePendingOperation(query, variables)`.
+
+- `query` must match the query that the component issues. Export the query from the component module and use it in the test. An identical (but not the same) query works as well.
+- `variables` must match the variables that the test invocation uses.
+  - Arrays are compared by values (not by reference). The order of elements matters.
+  - Nested objects are compared deeply. The order of keys is not relevant.
+
+### Troubleshooting preloaded query tests
+
+- Use `console.log` before and after `useQueryLoader`, `usePreloadedQuery` and `loadQuery` in the component, and in the `queueOperationResolver` callback in the test.
+- If `loadQuery` is not called, issue the triggering event. Depending on the component, it is a user action (button click, key press), a javascript event, or a delayed execution with `useEffect`.
+  - For the `useEffect` case, call `act(() => jest.runAllImmediates())` **after** rendering the component.
+- If "before" `usePreloadedQuery` is hit but "after" is not, the query suspends. The cause is one of these:
+  - A different query is used. The query resolver is not called, and `currentOperation` is `null`.
+  - The query variables do not match. The query resolver is not called, and `currentOperation` is `null`. Inspect the `variables`, and make sure arrays are in the same order.
+- If the data returned from the query is not what you expect, make sure you generate the right GraphQL type. Values such as `<mock-value-for-field-"formatted_amount">` show that you mock the wrong type.
+- The component and the test must use the same environment. No `RelayEnvironmentProvider` with another environment may be nested in the test React tree.
+- The examples use `testing-library-react`. They also work with `react-test-renderer`.
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Test hangs / Suspense never resolves | Operation not resolved before assertion | Call `resolveMostRecentOperation` inside `act()` before the assertion. |
-| "No operations in flight" | Query not yet issued when resolving | Render first, then inspect `getAllOperations()`; wrap in `act()` so effects flush. |
-| `usePreloadedQuery` never completes | Missing `queuePendingOperation` or variable mismatch | Call `queuePendingOperation(query, vars)` with the exact same variables as `loadQuery`. |
-| `queueOperationResolver` not firing | Registered after operation was issued | Register the resolver before `loadQuery` or render. |
+| `getMostRecentOperation` throws | No operation was executed before the call | Render first, then call `getMostRecentOperation()`. |
+| `usePreloadedQuery` never completes | Missing `queuePendingOperation`, or variable mismatch | Call `queuePendingOperation(query, vars)` with the same variables as the component. |
+| `queueOperationResolver` not firing | Registered after the operation was issued | Register the resolver before you render the component. |
 | Scalar resolvers ignored | Missing `@relay_test_operation` directive | Add `@relay_test_operation` to the query used in tests. |
-| Payload shape mismatch errors | Mock resolver returned extra/missing fields for a type | Omit unknown fields; let `MockPayloadGenerator` fill the rest. |
-| `act()` warnings in console | State update not wrapped | Wrap the resolve/reject call in `act(() => { ... })`. |
-| Duplicate IDs across pagination pages | `generateId()` restarts per resolver call | Offset IDs explicitly per page in the resolver. |
-| Cache bleeds between tests | Reused environment | Create a new `createMockEnvironment()` in `beforeEach`. |
+| Components not fully updated | Resolution not wrapped in `act` | Wrap the resolve/reject call in `act(() => { ... })`. |
+| Duplicate IDs across pagination pages | Same ID pattern for both pages | Use a different ID prefix per page in the `ID` resolver. |
 | `loadQuery` inside `useEffect` not fetching | Immediate never flushed | `act(() => jest.runAllImmediates())` after render. |
-| "Operation not found" in `findOperation` | Predicate too strict or query name differs | Log `getAllOperations().map(o => o.fragment.node.name)` and match exactly. |
-| Optimistic update not seen | Asserted after server resolve | Assert immediately after the mutation dispatch, before `resolveMostRecentOperation`. |
-| Subscription only emits once | Used `resolve` instead of `nextValue` | Use `nextValue` for each payload; `complete` when done. |
+| Subscription only emits once | Used `resolve`, which completes the request | Use `nextValue` for each payload; `complete` when done. |
+| Mock values look like `<mock-value-for-field-"x">` | Mocked the wrong type | Log the operation JSON and mock the type that owns the field. |
+| Deferred data never renders | Used `generate` for a query with `@defer` | Use `generateWithDefer` with `generateDeferredPayload: true`. |

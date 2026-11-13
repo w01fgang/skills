@@ -1,423 +1,148 @@
 # Relay EntryPoints
 
-EntryPoints bundle **code** and **data** for a unit of UI (a route, modal, popover) so both can be preloaded in parallel before the component renders. They extend the render-as-you-fetch pattern of `useQueryLoader`/`usePreloadedQuery` with parallel **code** loading and composition of nested units.
+An EntryPoint is a lightweight object. It holds the components to load (as calls to `JSResource`) and the queries to load before a route, popover or other piece of conditionally loaded UI renders. `loadEntryPoint` and `EntryPointContainer` implement the "render-as-you-fetch" pattern.
 
 ## What is an EntryPoint?
 
-An EntryPoint is a lightweight object describing:
+- An EntryPoint has a `getPreloadProps` method. It takes the EntryPoint params.
+- All queries required for the initial render of a piece of UI belong in the EntryPoint of that UI.
+- An EntryPoint can contain queries and other EntryPoints.
+- If `getPreloadProps` returns an object with an `extraProps` property, Relay passes those props to the EntryPoint component as `extraProps`.
+- A query or an EntryPoint is lazy loaded if the request for the data occurs at render time. Lazy loaded queries and EntryPoints have performance downsides, are vulnerable to over- and under-fetching, and can render components with null data. Avoid them.
 
-- **`root`** — a `JSResource` pointing to the component module to render
-- **`getPreloadProps(params)`** — pure function mapping route params to the queries (and nested entrypoints) that must be preloaded before rendering
-- Optionally nested **`entryPoints`** — other EntryPoints to load in parallel
+## JSResource
 
-When loaded, Relay fires the queries *and* starts downloading the component chunk simultaneously. The component renders as soon as both are ready.
+`JSResource` is an API that loads a React component on demand. A direct import or require bundles the component with the first require. `JSResource` is safe to use in EntryPoint files. See [the npm module](https://www.npmjs.com/package/jsresource).
 
-### When to use over `useQueryLoader`
+## Component props
 
-Use `useQueryLoader` + `usePreloadedQuery` when the rendering component is already in the JS bundle. Use EntryPoints when you also want to **code-split** the rendering component, or when a unit of UI composes multiple code-split children each with their own queries.
+The EntryPoint component receives these props:
 
-## JSResource: code splitting
-
-`JSResource` is a thin wrapper around dynamic `import()` that the EntryPoint APIs understand. It's not shipped with Relay — projects typically define their own or use one from their router. The canonical shape:
-
-```tsx
-// JSResource.ts
-type Loader<T> = () => Promise<{default: T}>;
-
-export interface JSResourceReference<T> {
-  load(): Promise<T>;
-  get(): T | undefined; // synchronous access once loaded
-  getModuleIfRequired(): T | undefined;
-}
-
-export function JSResource<T>(
-  moduleId: string,
-  loader: Loader<T>,
-): JSResourceReference<T> {
-  let promise: Promise<T> | undefined;
-  let resolved: T | undefined;
-  return {
-    load() {
-      if (!promise) {
-        promise = loader().then(m => {
-          resolved = m.default;
-          return resolved;
-        });
-      }
-      return promise;
-    },
-    get: () => resolved,
-    getModuleIfRequired: () => resolved,
-  };
-}
-```
-
-Using it:
-
-```tsx
-import {JSResource} from './JSResource';
-import type UserProfileType from './UserProfile';
-
-export const UserProfileResource = JSResource<typeof UserProfileType>(
-  'UserProfile',
-  () => import('./UserProfile'),
-);
-```
-
-## Defining an EntryPoint
-
-An EntryPoint is defined in its own file, conventionally named `*.entrypoint.ts`. It must import **types only** from the component (never the component itself) to keep the entrypoint module tiny.
-
-```tsx
-// UserProfile.entrypoint.ts
-import type {EntryPoint} from 'react-relay';
-import type UserProfile from './UserProfile';
-import type UserProfileQueryType from './__generated__/UserProfileQuery.graphql';
-
-import {JSResource} from './JSResource';
-import UserProfileQuery from './__generated__/UserProfileQuery.graphql';
-
-type Params = {userId: string};
-
-export const UserProfileEntryPoint: EntryPoint<typeof UserProfile, Params> = {
-  root: JSResource('UserProfile', () => import('./UserProfile')),
-  getPreloadProps({userId}) {
-    return {
-      queries: {
-        userProfileQuery: {
-          parameters: UserProfileQuery,
-          variables: {id: userId},
-          options: {fetchPolicy: 'store-or-network'},
-        },
-      },
-    };
-  },
-};
-```
-
-The component receives the preloaded queries in a `queries` prop keyed by the names from `getPreloadProps`:
-
-```tsx
-// UserProfile.tsx
-import type {EntryPointComponent} from 'react-relay';
-import type UserProfileQueryType from './__generated__/UserProfileQuery.graphql';
-
-import {graphql, usePreloadedQuery} from 'react-relay';
-
-type Queries = {userProfileQuery: UserProfileQueryType};
-type RuntimeProps = {highlight?: boolean};
-
-const UserProfile: EntryPointComponent<Queries, {}, RuntimeProps> = ({
-  queries,
-  props,
-}) => {
-  const data = usePreloadedQuery(
-    graphql`
-      query UserProfileQuery($id: ID!) {
-        user(id: $id) {
-          name
-          avatarUrl
-        }
-      }
-    `,
-    queries.userProfileQuery,
-  );
-  return (
-    <section data-highlight={props.highlight}>
-      <h1>{data.user?.name}</h1>
-    </section>
-  );
-};
-
-export default UserProfile;
-```
-
-## Nested EntryPoints
-
-`getPreloadProps` can also return `entryPoints`. Each nested entrypoint is loaded in parallel with the parent's queries, and arrives in the component as a `PreloadedEntryPoint` ready to be rendered with `<EntryPointContainer>`.
-
-```tsx
-// Dashboard.entrypoint.ts
-import type {EntryPoint} from 'react-relay';
-import type Dashboard from './Dashboard';
-
-import {JSResource} from './JSResource';
-import DashboardQuery from './__generated__/DashboardQuery.graphql';
-import {UserProfileEntryPoint} from './UserProfile.entrypoint';
-import {ActivityFeedEntryPoint} from './ActivityFeed.entrypoint';
-
-type Params = {userId: string};
-
-export const DashboardEntryPoint: EntryPoint<typeof Dashboard, Params> = {
-  root: JSResource('Dashboard', () => import('./Dashboard')),
-  getPreloadProps({userId}) {
-    return {
-      queries: {
-        dashboardQuery: {
-          parameters: DashboardQuery,
-          variables: {id: userId},
-        },
-      },
-      entryPoints: {
-        profile: {
-          entryPoint: UserProfileEntryPoint,
-          entryPointParams: {userId},
-        },
-        feed: {
-          entryPoint: ActivityFeedEntryPoint,
-          entryPointParams: {userId, limit: 20},
-        },
-      },
-    };
-  },
-};
-```
-
-The parent component renders each child with `EntryPointContainer`:
-
-```tsx
-// Dashboard.tsx
-import type {EntryPointComponent} from 'react-relay';
-import type DashboardQueryType from './__generated__/DashboardQuery.graphql';
-import type UserProfile from './UserProfile';
-import type ActivityFeed from './ActivityFeed';
-
-import {Suspense} from 'react';
-import {EntryPointContainer, graphql, usePreloadedQuery} from 'react-relay';
-
-type Queries = {dashboardQuery: DashboardQueryType};
-type NestedEntryPoints = {
-  profile: typeof UserProfile;
-  feed: typeof ActivityFeed;
-};
-
-const Dashboard: EntryPointComponent<Queries, NestedEntryPoints> = ({
-  queries,
-  entryPoints,
-}) => {
-  const data = usePreloadedQuery(
-    graphql`
-      query DashboardQuery($id: ID!) {
-        user(id: $id) { displayName }
-      }
-    `,
-    queries.dashboardQuery,
-  );
-  return (
-    <div>
-      <h1>{data.user?.displayName}</h1>
-      <Suspense fallback="Loading profile...">
-        <EntryPointContainer
-          entryPointReference={entryPoints.profile}
-          props={{highlight: true}}
-        />
-      </Suspense>
-      <Suspense fallback="Loading feed...">
-        <EntryPointContainer
-          entryPointReference={entryPoints.feed}
-          props={{}}
-        />
-      </Suspense>
-    </div>
-  );
-};
-
-export default Dashboard;
-```
+- `queries` — the preloaded queries (type parameter `TPreloadedQueries`).
+- `entryPoints` — the nested EntryPoints (type parameter `TPreloadedEntryPoints`).
+- `extraProps` — the `extraProps` property of the `getPreloadProps` result (type parameter `TExtraProps`).
+- `props` — the runtime props that `EntryPointContainer` passes down (type parameter `TRuntimeProps`).
 
 ## `useEntryPointLoader` hook
 
-The hook-based way to load an entrypoint. It owns the ref's lifetime and disposes on unmount or reload.
+The hook keeps an EntryPoint reference in state and disposes of it when it is not accessible through state. This avoids data leaking into the Relay store.
 
-```tsx
-const [entryPointRef, loadEntryPoint, disposeEntryPoint] =
-  useEntryPointLoader(environmentProvider, DashboardEntryPoint);
-```
+```js
+const {useEntryPointLoader, EntryPointContainer} = require('react-relay');
 
-- **`environmentProvider`** — `{getEnvironment(): Environment}`. Usually a stable module-level object.
-- **`entryPointRef`** — `PreloadedEntryPoint | null`. Pass to `EntryPointContainer`.
-- **`loadEntryPoint(params)`** — begins loading code + data. Disposes any prior ref automatically.
-- **`disposeEntryPoint()`** — releases retained query data. Do not call during render.
+const ComponentEntryPoint = require('Component.entrypoint');
 
-Example — loading on a button click:
+function EntryPointRevealer(): React.MixedElement {
+  const environmentProvider = useMyEnvironmentProvider();
+  const [
+    entryPointReference,
+    loadEntryPoint,
+    disposeEntryPoint,
+  ] = useEntryPointLoader(environmentProvider, ComponentEntryPoint);
 
-```tsx
-import {Suspense} from 'react';
-import {EntryPointContainer, useEntryPointLoader} from 'react-relay';
-import {environmentProvider} from './environment';
-import {UserProfileEntryPoint} from './UserProfile.entrypoint';
-
-function ProfileLauncher({userId}: {userId: string}) {
-  const [ref, load, dispose] = useEntryPointLoader(
-    environmentProvider,
-    UserProfileEntryPoint,
-  );
   return (
     <>
-      <button onClick={() => load({userId})}>Open profile</button>
-      {ref != null && (
-        <dialog open>
-          <button onClick={dispose}>Close</button>
-          <Suspense fallback="Loading...">
-            <EntryPointContainer entryPointReference={ref} props={{}} />
-          </Suspense>
-        </dialog>
-      )}
+      {
+        entryPointReference == null && (
+          <Button onClick={() => loadEntryPoint({})}>
+            Click to reveal the contents of the EntryPoint
+          </Button>
+        )
+      }
+      {
+        entryPointReference != null && (
+          <>
+            <Button onClick={disposeEntryPoint}>
+              Click to hide and dispose the EntryPoint.
+            </Button>
+            <Suspense fallback="Loading...">
+              <EntryPointContainer
+                entryPointReference={entryPointReference}
+                props={{}}
+              />
+            </Suspense>
+          </>
+        )
+      }
     </>
   );
 }
 ```
 
+Arguments:
+
+- **`environmentProvider`** — an object with a `getEnvironment` method that returns a Relay environment.
+- **`EntryPoint`** — the EntryPoint, usually acquired by importing a `.entrypoint.js` file.
+
+Return value, a tuple:
+
+- **`entryPointReference`** — the EntryPoint reference, or `null`.
+- **`loadEntryPoint(params)`** — loads an EntryPoint. The result is available as `entryPointReference`. It disposes of the EntryPoint that an earlier call loaded. `params` is the `TEntryPointParams` value that Relay passes to `getPreloadProps`. It may throw an error if called during React's render phase.
+- **`disposeEntryPoint()`** — sets `entryPointReference` to `null` and calls `.dispose()` on it. Type `() => void`. Do not call it during React's render phase.
+
 Notes:
-- `loadEntryPoint` throws if invoked during render — fire it from an effect or event handler.
-- Data is written to the store when both AST and query response are available and stays retained until disposal.
+- Call `loadEntryPoint` from an event handler or an effect. The docs state that it can throw during React's render phase. The v20.1.1 and v21.0.1 source of `loadEntryPoint.js` has no render-phase check, so a call in render creates a new undisposed ref on every render.
+- When `loadEntryPoint` runs, each query of the EntryPoint loads its query data and query AST. Relay writes the data to the store when both the AST and the data are available. This differs from `prepareEntryPoint_DEPRECATED`, which writes the data only when `usePreloadedQuery` renders the query.
+- The Relay store retains the queries of the EntryPoint reference. Data stays in the store until `.dispose()` runs on the reference. After that, the data can be garbage collected.
 
 ## `loadEntryPoint` imperative
 
-`loadEntryPoint` is the raw function behind the hook. Prefer the hook in components; use `loadEntryPoint` from routers or event handlers that outlive a single component's lifecycle.
+`loadEntryPoint` is designed for use with `EntryPointContainer`. Prefer `useEntryPointLoader` when possible, because it disposes of EntryPoint references for you.
 
-```tsx
-import {loadEntryPoint, type PreloadedEntryPoint} from 'react-relay';
-import {environmentProvider} from './environment';
-import {DashboardEntryPoint} from './Dashboard.entrypoint';
-import type Dashboard from './Dashboard';
+```js
+const EntryPoint = require('MyComponent.entrypoint.js');
 
-const ref: PreloadedEntryPoint<typeof Dashboard> = loadEntryPoint(
-  environmentProvider,
-  DashboardEntryPoint,
-  {userId: 'u_42'},
+// Generally, your component should access the environment from the React context,
+// and pass that environment to this function.
+const getEntrypointReference = environment => loadEntryPoint(
+  { getEnvironment: () => environment },
+  EntryPoint,
+  {id: '4'},
 );
 
-// Later, when no longer rendered:
-ref.dispose();
+// later: pass entryPointReference to EntryPointContainer
+// Note that EntryPoint references should have .dispose() called on them,
+// which is missing in this example.
 ```
 
-The returned ref has `.dispose()` which releases retained store data. Until disposed, the data remains and will not be garbage collected.
+Arguments:
+
+- **`environmentProvider`** — a provider for the Relay Environment instance that executes the request. Inside a React component, use the environment from `useRelayEnvironment`.
+- **`EntryPoint`** — the EntryPoint to load.
+- **`entryPointParams`** — the parameters that Relay passes to the `getPreloadProps` method of the EntryPoint.
+
+Return value: an EntryPoint reference with the property `dispose`.
+
+- `dispose` releases the query references that this EntryPoint loaded, including nested EntryPoints. The store releases them, so Relay can garbage collect their data.
+- The docs state that only `dispose` is a stable property of the reference. The format of the other properties is unstable. Pass the reference to `EntryPointContainer`.
+
+Behavior:
+
+- `loadEntryPoint` loads the query data and query AST of each associated query. Relay writes the data to the store when both are available.
+- References from `loadEntryPoint` leak data to the Relay store unless `.dispose()` runs on them when nothing references them any longer.
+- `loadEntryPoint` may throw an error if called during React's render phase.
 
 ## `<EntryPointContainer />`
 
-Renders a preloaded EntryPoint.
+A React component that renders a preloaded EntryPoint.
 
-```tsx
-<EntryPointContainer
-  entryPointReference={ref}
-  props={{highlight: true}}
-/>
+```js
+function EntryPointContainer({
+  entryPointReference,
+  props,
+}: {
+  +entryPointReference: PreloadedEntryPoint<TEntryPointComponent>,
+  +props: TRuntimeProps,
+}): ReactElement
 ```
 
 Props:
-- **`entryPointReference`** — from `loadEntryPoint` or `useEntryPointLoader`.
-- **`props`** — runtime props forwarded to the component's `props` argument (typed as `TRuntimeProps`).
-
-The container suspends until both the code chunk and query data are ready, so wrap it in `<Suspense>`.
-
-## Router integration
-
-The strongest use case: preload code + data when a route match is detected, before the destination component mounts.
-
-```tsx
-// routes.ts
-import type {EntryPoint} from 'react-relay';
-import {DashboardEntryPoint} from './Dashboard.entrypoint';
-import {UserProfileEntryPoint} from './UserProfile.entrypoint';
-
-export const routes = [
-  {path: '/dashboard/:userId', entryPoint: DashboardEntryPoint},
-  {path: '/users/:userId', entryPoint: UserProfileEntryPoint},
-] satisfies Array<{path: string; entryPoint: EntryPoint<any, any>}>;
-```
-
-```tsx
-// RouterHost.tsx
-import {Suspense, useEffect, useState} from 'react';
-import {EntryPointContainer, loadEntryPoint} from 'react-relay';
-import {environmentProvider} from './environment';
-import {matchRoute} from './matchRoute';
-
-type Match = {
-  ref: ReturnType<typeof loadEntryPoint>;
-  params: Record<string, string>;
-};
-
-function RouterHost({location}: {location: string}) {
-  const [match, setMatch] = useState<Match | null>(null);
-
-  useEffect(() => {
-    const matched = matchRoute(location);
-    if (!matched) return;
-    const ref = loadEntryPoint(
-      environmentProvider,
-      matched.entryPoint,
-      matched.params,
-    );
-    setMatch({ref, params: matched.params});
-    return () => ref.dispose();
-  }, [location]);
-
-  if (!match) return null;
-  return (
-    <Suspense fallback="Loading...">
-      <EntryPointContainer
-        entryPointReference={match.ref}
-        props={match.params}
-      />
-    </Suspense>
-  );
-}
-```
-
-Prefetching on link hover:
-
-```tsx
-function PrefetchLink({
-  to,
-  entryPoint,
-  params,
-  children,
-}: {
-  to: string;
-  entryPoint: EntryPoint<any, any>;
-  params: any;
-  children: React.ReactNode;
-}) {
-  const prefetch = () => {
-    const ref = loadEntryPoint(environmentProvider, entryPoint, params);
-    // Store and dispose after navigation completes, or on timeout.
-    setTimeout(() => ref.dispose(), 30_000);
-  };
-  return (
-    <a href={to} onMouseEnter={prefetch} onFocus={prefetch}>
-      {children}
-    </a>
-  );
-}
-```
+- **`entryPointReference`** — the value from `loadEntryPoint` or from the `useEntryPointLoader` hook.
+- **`props`** — additional runtime props that Relay passes to the component.
 
 ## Disposing EntryPoint refs
 
-Every successful `loadEntryPoint` retains query data in the store. You **must** dispose:
-
-- `useEntryPointLoader` disposes automatically on unmount, on re-load, and via the returned `disposeEntryPoint`.
-- `loadEntryPoint` must be manually disposed via `ref.dispose()` when the ref is no longer rendered.
-
-Rules:
-- Never call `dispose` during React render.
-- Calling `dispose` on an already-disposed ref is a no-op but don't rely on it — track lifetime in effect cleanups.
-- After disposal, the ref's data becomes eligible for GC; do not render an EntryPointContainer with a disposed ref.
-
-## EntryPoint vs `useQueryLoader`
-
-| Aspect | `useQueryLoader` + `usePreloadedQuery` | EntryPoints |
-|--------|----------------------------------------|-------------|
-| Preloads query data | Yes | Yes |
-| Preloads component code | No (component must be imported) | Yes, via `JSResource` |
-| Composition of nested code-split units | Manual (`useQueryLoader` per child) | Built-in via `entryPoints` in `getPreloadProps` |
-| API surface | 1 hook + 1 hook | 1 hook + 1 component + definition file |
-| Typical caller | Any component | Router, route boundary, modal opener |
-| Runtime props channel | N/A | `<EntryPointContainer props>` |
-| Setup cost | Low | Medium (definition + JSResource infra) |
-| Best for | Single known query before render | Route-level units with code + data + children |
-| Disposal | Automatic via hook | Automatic via hook, manual via `loadEntryPoint` |
-| Param shape | Query variables | Arbitrary params mapped by `getPreloadProps` |
-
-Rule of thumb: reach for `useQueryLoader` for a single query inside an already-loaded component; reach for EntryPoints when the unit of UI is itself code-split or composes multiple code-split children.
+- `useEntryPointLoader` disposes of the reference when it is not accessible through state.
+- A reference from `loadEntryPoint` needs a `.dispose()` call when nothing references it any longer.
+- After `.dispose()`, the data of the associated queries can be garbage collected.
+- Do not call `disposeEntryPoint` during React's render phase.

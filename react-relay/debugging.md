@@ -1,471 +1,305 @@
 # Debugging Relay
 
-Reference for diagnosing Relay issues: DevTools, store consistency, mutation directives, null fields, missing fields, compiler artifacts, and verbose environment logging. Hooks only.
+Reference for diagnosing Relay issues: DevTools, store consistency, mutation directives, null fields, compiler tooling and field-level error logging.
 
 ## Relay DevTools
 
-Browser extension for inspecting the Relay store, network traffic, and environment state at runtime.
-
 ### Installation
 
-Install from the Chrome Web Store: "Relay Developer Tools" (id `ncedobpgnmkhcmnnkcimnobpfepidadl`). A `Relay` panel is added to Chrome DevTools. For Firefox, use the add-on of the same name.
+Install the extension from the [Chrome store](https://chrome.google.com/webstore/detail/relay-developer-tools/ncedobpgnmkhcmnnkcimnobpfepidadl). A new tab called Relay appears in your Chrome DevTools. In this tab, you select between 2 panels: the network panel and the store panel.
 
-Enable DevTools hook in your environment initialization — no special flag is needed; the extension detects any `RelayModernEnvironment` constructed on `window`. For SSR apps, DevTools only activate client-side after hydration.
+### Network panel
 
-### Environment selector
+The network panel shows individual requests in an active environment. You scroll through the requests, search for requests and view the details of each request. The details of each request include the status, the variables and the responses.
 
-The top-left dropdown lists every active `Environment` instance. Multi-environment apps (e.g. logged-in vs anonymous) show each separately. Store and network panes are scoped to the selected environment — switching clears filters.
+### Store panel
 
-### Store inspector
+The store panel shows individual records from the store data in an active environment. You scroll through the records, search for records and view the details of each record. The details of each record include the ID, the typename and all of the data in the record. If a field in the data is a reference to another record, click the reference to go to that record. You can copy the store data in JSON format to the clipboard.
 
-Browse normalized records in the cache.
+### Multiple environments
 
-- Left column: scrollable list of record IDs (e.g. `User:42`, `client:root`, `client:root:viewer`).
-- Right column: key/value view of the selected record — `__id`, `__typename`, scalar fields, and links (`__ref`, `__refs`).
-- Click any `__ref` to jump to the referenced record.
-- Search box filters by ID substring or `__typename`.
-- "Copy as JSON" dumps the whole store to clipboard for offline diff.
-
-Use it to confirm whether a field reached the store. If `User:42.name` is missing in the inspector, no component reading `user.name` will render it — the fetch or fragment spread is the problem, not React.
-
-### Network inspector
-
-Lists every `execute` call against the environment. Each row shows operation name, status, duration, variables, and the raw response. Click a row to expand:
-
-- `Variables` — payload sent with the query.
-- `Response` — exact GraphQL response, including `errors` array.
-- `Metadata` — operation kind (`query` | `mutation` | `subscription`), cache config.
-
-Mutations and subscriptions appear in the same list, tagged by kind. For subscriptions, each emitted payload is a new row under the subscription operation.
-
-### Limitations
-
-- No mutation optimistic-update diff view — use the store inspector before/after.
-- No time-travel; refreshing the page clears history.
-- Does not show garbage-collected records.
+A dropdown menu on the left side of the developer tools switches between environments. The requests in the network panel and the store data are grouped by environment.
 
 ---
 
 ## Inconsistent Typename Error
 
+The GraphQL server likely violated the globally unique ID requirement by returning the same ID for different objects.
+
 ### Symptom
 
-Console error during normalization of a response:
-
 ```
-RelayResponseNormalizer: Invalid record. Expected __typename to be consistent,
-but the record was assigned conflicting types User and MessagingParticipant.
-The GraphQL server likely violated the globally unique id requirement by
-returning the same id for different objects.
+`RelayResponseNormalizer: Invalid record '543'. Expected __typename to be consistent, but the record was assigned conflicting types Foo and Bar. The GraphQL server likely violated the globally unique ID requirement by returning the same ID for different objects.`
 ```
 
-The store then contains a corrupted record. Subsequent fragment reads may return stale fields from the previous type.
+The server implementation of one of the types is not spec compliant. Relay requires the `id` field to be globally unique. Relay stores objects in a normalized key-value store, and one of the objects overwrote the other. This breaks your app in some subtle or less subtle way.
 
-### Root cause
+### Common cause
 
-Relay's store is normalized by record ID. When two responses return the same `id` for objects of different types, the second overwrites the first. The GraphQL spec (and Relay's Object Identification assumption) requires IDs to be globally unique across the entire schema, not just per-type.
+The most common reason is that 2 objects backed by an ID use the plain ID as the id field, such as a `User` and a `MessagingParticipant`. Less common reasons are array indices, or auto-increment IDs from a database that are not unique to the type.
 
-Common triggers:
+### Fix: make your type spec compliant
 
-- Server returns raw database primary keys that collide across tables (`users.id=1` and `posts.id=1`).
-- `id` is derived from an array index.
-- Two types share a join table.
+For 2 different types backed by the same ID, a common solution is to prefix the ID of the less widely used type with a unique string and then base64 encode the result. Implement a `NodeTokenResolver` with the helper trait `NodeTokenResolverWithPrefix`. When the `NodeTokenResolver` is registered, you can load your type with the `node(id: $yourID)` GraphQL call, and your type can return an encoded ID.
 
-### Fixes
-
-Prefer server-side fixes — client workarounds are fragile.
-
-**Schema fix (preferred)**: encode type into the global ID. A common convention is `base64(Type:rawId)`, e.g. `VXNlcjox` for `User:1`. Keep resolvers symmetric with `node(id:)`.
-
-**Client-side fix**: set a custom `getDataID` on the `Store`:
-
-```js
-import { Environment, Network, RecordSource, Store } from 'relay-runtime';
-
-const store = new Store(new RecordSource(), {
-  getDataID: (fieldValue, typename) => `${typename}:${fieldValue.id}`,
-});
-```
-
-This prefixes every record ID with its typename at normalization time, restoring uniqueness without server changes. Note: once set, you cannot later rely on raw `id` values as record IDs — `node(id:)` queries must use the same encoding.
-
-**Verification**: after the fix, clear the store (`environment.getStore().publish(new RecordSource())`) or hard-reload; the error should not recur.
+The `getDataID` option of the `Environment` is a function that generates a unique ID for a given object. It is meant for servers that do not implement the Global Object Identification spec.
 
 ---
 
 ## Debugging Declarative Mutation Directives
 
-Directives `@appendEdge`, `@prependEdge`, `@appendNode`, `@prependNode`, `@deleteEdge`, `@deleteRecord` require runtime handlers.
-
-### Error: handler not registered
+If you see an error similar to:
 
 ```
-RelayModernEnvironment: Expected a handler to be provided for handle `deleteRecord`.
+RelayFBHandlerProvider: No handler defined for `deleteRecord`. [Caught in: An uncaught error was thrown inside `RelayObservable`.]
 ```
 
 or
 
 ```
-RelayFBHandlerProvider: No handler defined for `deleteRecord`
+RelayModernEnvironment: Expected a handler to be provided for handle `deleteRecord`.
 ```
 
-**Cause**: a custom `handlerProvider` was passed to `Environment` without registering mutation handlers.
-
-**Fix**: import `MutationHandlers` from `relay-runtime`. The documented handlers are `AppendEdgeHandler`, `PrependEdgeHandler`, and `DeleteRecordHandler`:
-
-```js
-import { Environment, MutationHandlers } from 'relay-runtime';
-
-const handlerProvider = (handle) => {
-  switch (handle) {
-    case 'appendEdge': return MutationHandlers.AppendEdgeHandler;
-    case 'prependEdge': return MutationHandlers.PrependEdgeHandler;
-    case 'deleteRecord': return MutationHandlers.DeleteRecordHandler;
-    default: return null;
-  }
-};
-
-const environment = new Environment({ network, store, handlerProvider });
-```
-
-If you do not pass a `handlerProvider`, Relay uses the default which already includes all mutation handlers — the error only happens when you override it.
-
-### Edge inserted but not visible
-
-Symptoms: mutation succeeds, DevTools shows the new node in the store, but the list component does not re-render with it.
-
-Checklist:
-
-1. **Connection ID mismatch**. `@appendEdge(connections: $ids)` requires the exact connection ID. Get it via `ConnectionHandler.getConnectionID(parentId, 'FeedConnection', filters)`. Log the ID before calling the mutation and compare to the one visible in the store inspector (`client:User:42:__FeedConnection_connection(orderBy:"DATE")`).
-
-2. **Missing `@connection` directive on the query**. Without `@connection(key: "FeedConnection")`, Relay does not track the list as a connection and has no stable ID to append to.
-
-3. **Filter args not included in the key**. If the connection has non-paginating args (like `orderBy`), include them in `filters` on both the query and the edge directive — otherwise IDs differ.
-
-4. **Edge shape mismatch**. Mutation response must return the edge in the exact shape of the connection's `edgeTypeName`, including `cursor` and `node { id }`. Missing `id` on the node means Relay cannot deduplicate.
-
-5. **Wrong edge type name**. `@appendNode(edgeTypeName: "FeedEdge")` must match the schema's connection edge type.
-
-### Edge deletion doesn't remove item
-
-- `@deleteEdge(connections: $ids)` deletes by node ID. The mutation response must return the deleted node's `id` field.
-- `@deleteRecord` removes the record from the store entirely. Any component still referencing it will see fields as null.
+A `handlerProvider` is passed to your Relay environment, and the handler provider does not accept the handles `"deleteRecord"`, `"appendEdge"` or `"prependEdge"`. Return `MutationHandlers.DeleteRecordHandler`, `MutationHandlers.AppendEdgeHandler` or `MutationHandlers.PrependEdgeHandler` respectively. Import them from `relay-runtime`.
 
 ---
 
 ## Why is my field null?
 
-Diagnostic flow when a component reads a field and gets `null` unexpectedly.
+Several reasons can make a field read by Relay null. Some are obscure.
 
-### 1. Check the server response
+### 1. Server returned null
 
-Open DevTools Network panel, find the operation, inspect `Response`. Is the field null in the raw payload?
+The server returned an explicit null. This happens in 2 cases:
 
-- **Yes, null in response**: the resolver returned null or threw. GraphQL coerces resolver exceptions to null for nullable fields. Check server logs and the `errors` array in the response.
-- **No, value present**: the value is in the response but null by the time the component reads it — continue below.
+1. The field resolver of the server returned an explicit null.
+2. The field resolver throws. GraphQL then returns null for that field, even if the return type of the server resolver is non-nullable. The exception is fields annotated as non-null: the server never returns null for them. If an exception occurs, the entire parent object is nulled out.
 
-### 2. Check the fragment
+How to tell: inspect the response of the server with Relay DevTools or the network tab of your browser dev tools, and check whether the field is null.
 
-```js
-const data = useFragment(graphql`
-  fragment UserCard_user on User {
-    name
-    # avatarUrl  <-- commented out = always null when read
-  }
-`, userRef);
-```
+### 2. Graph relationship change
 
-If the field is not in the fragment, `data.avatarUrl` is `undefined` (TypeScript) or `null` — Relay only returns fields the fragment selects. Add the field and re-run the compiler.
+If a different query, mutation or subscription observes a relationship change in the graph, you can read fields off an object that your query never fetched.
 
-### 3. Check for graph relationship changes
-
-Relay's store is normalized. A component reads `viewer.bestFriend.name`. Later, another query/mutation updates `viewer.bestFriend` to point at a different `User` record whose `name` was never fetched. The component re-renders with `name: null`.
-
-Console warning in development:
-
-```
-RelayResponseNormalizer: Invalid record `User:17`. Expected field `name`
-to be present but it was not found.
-```
-
-Fix: ensure every query/mutation/subscription that can change the relationship selects all fields downstream components need. Use a shared fragment.
-
-### 4. Check garbage collection
-
-Records with no active subscribers are eligible for GC. A component that mounts, unmounts, then remounts may find its records evicted. Hooks-based Relay (`useLazyLoadQuery`, `useQueryLoader`) retains records only while the hook is mounted.
-
-Symptoms: first render works, navigating away and back shows nulls. Fix by increasing GC retention or retaining the query:
-
-```js
-const [queryRef, loadQuery] = useQueryLoader(MyQuery);
-// queryRef holds a retain ref; keeps records alive across unmounts of child.
-```
-
-Or configure the store: `new Store(source, { gcReleaseBufferSize: 10 })`.
-
-### 5. Check `@required` behavior
+A query that reads the name of your best friend:
 
 ```graphql
-fragment User_profile on User {
-  name @required(action: LOG)
-  email @required(action: THROW)
-}
-```
-
-- `action: NONE` — null allowed, no action.
-- `action: LOG` — parent becomes null; `missing_required_field.log` event fires via the environment's field logger.
-- `action: THROW` — throws during render; requires an error boundary.
-
-A `@required(action: LOG)` field bubbles null to the parent. If the parent is non-null in the schema, Relay makes the fragment root `null` — the whole component gets `data === null`. Remove `@required` or downgrade to `NONE` to see raw nulls while debugging.
-
-### 6. Check client-side updates
-
-Optimistic updaters or imperative `commitLocalUpdate` can delete or partially populate records:
-
-```js
-environment.commitUpdate((store) => {
-  const user = store.get('User:42');
-  user.setValue(null, 'name'); // explicit null
-});
-```
-
-The store inspector shows the current field values. If `name` is null there, a client updater wrote null.
-
----
-
-## Why is my field not found?
-
-Compile-time or runtime errors where a selected field appears missing.
-
-### Compiler error: unknown field
-
-```
-Error: The type `User` has no field `avatarUrll`.
-  ┌─ UserCard.tsx:4:5
-  │
-4 │     avatarUrll
-  │     ^^^^^^^^^^ The type `User` has no field `avatarUrll`.
-```
-
-Typo or schema drift. Update the schema file the compiler points at (`relay.config.json` → `schema`).
-
-### Compiler error: fragment not found
-
-```
-Error: Unknown fragment `UserCard_user`.
-```
-
-Causes:
-
-1. The fragment file wasn't imported where it's spread. Relay compiler scans files matching `src` glob. If the fragment lives outside the scanned paths, it won't be found.
-2. The fragment's file is ignored by `exclude` patterns.
-3. File uses `.jsx` but `extensions` only lists `js`.
-
-### Runtime: `data.fieldName` is `undefined`
-
-- The fragment does not spread another fragment that selects the field.
-- Generated artifacts are stale. Re-run the compiler:
-
-```
-yarn relay         # one-shot
-yarn relay --watch # watch mode
-```
-
-`__generated__/UserCard_user.graphql.ts` must contain the field in its selections. If not, the compiler didn't see your edit.
-
-### Stale `__generated__` in CI
-
-Symptoms: works locally, fails in CI with field-not-found. Cause: `__generated__` is gitignored but the CI compiler step is missing, so artifacts aren't rebuilt.
-
-Fix: either check in `__generated__` or run `relay-compiler` in CI before the bundler. Add a check:
-
-```
-yarn relay && git diff --exit-code
-```
-
-This fails CI if committed artifacts are out of sync.
-
-### Fragment spread missing
-
-Parent query reads a field that belongs only to a child's fragment:
-
-```graphql
-query FeedQuery { viewer { ...UserCard_user } }
-fragment UserCard_user on User { name }
-```
-
-Parent tries `data.viewer.email` — not selected anywhere. Add `email` to `UserCard_user` or to the query directly.
-
-### `useFragment` returns unexpected shape
-
-Always pass the fragment ref from the parent's `...Child_fragment` spread, not the full parent data:
-
-```js
-// wrong — passes the whole viewer object
-useFragment(UserCard_user, data.viewer);
-
-// correct — viewer is spread with ...UserCard_user in parent
-useFragment(UserCard_user, data.viewer);
-```
-
-Types catch this when using the generated `FragmentType` imports.
-
----
-
-## Verbose environment logging
-
-Pass a `log` callback to `Environment` to receive every internal event.
-
-```js
-import { Environment, Network, RecordSource, Store } from 'relay-runtime';
-
-const environment = new Environment({
-  network: Network.create(fetchQuery),
-  store: new Store(new RecordSource()),
-  log: (event) => {
-    console.log('[relay]', event.name, event);
-  },
-});
-```
-
-### Event names
-
-- `execute.start` — operation starts; includes `variables`, `transactionID`.
-- `execute.next` — response payload received.
-- `execute.complete` — operation finished.
-- `execute.error` — operation failed; includes `error`.
-- `execute.unsubscribe` — subscription cancelled.
-- `network.info` — network-layer info (e.g. cache hits).
-- `network.start` / `network.next` / `network.complete` / `network.error`.
-- `queryresource.fetch` — `useLazyLoadQuery` fetching.
-- `queryresource.retain` / `queryresource.release`.
-- `store.publish` — records written to store; includes `source`.
-- `store.gc` — garbage collection ran; includes `references` retained.
-- `store.restore` — store restored from snapshot.
-- `store.snapshot` — snapshot taken.
-- `store.notify.start` / `store.notify.complete` — subscribers being notified.
-- `entrypoint.root.consume` — entrypoint resource read.
-
-Filter noise in dev:
-
-```js
-log: (event) => {
-  if (event.name.startsWith('store.gc')) return;
-  console.log(event.name, event);
-}
-```
-
-### Field-missing logger
-
-Separate from `log`: `relayFieldLogger` receives `missing_required_field.log` and `missing_expected_data.log` events. Useful for wiring `@required(action: LOG)` into Sentry:
-
-```js
-new Environment({
-  network, store,
-  relayFieldLogger: (event) => {
-    if (event.kind === 'missing_required_field.log') {
-      Sentry.captureMessage(`@required null: ${event.owner}.${event.fieldPath}`);
+query MyQuery {
+  me {
+    best_friend {
+      # id: 1
+      name
     }
-  },
-});
+  }
+}
 ```
+
+After the query response, your best friend changes on the server. A different query, mutation or subscription fetches a different set of fields off `best_friend`:
+
+```graphql
+query OtherQuery {
+  me {
+    best_friend {
+      # new id: 2
+      # Note: name is not fetched here
+      age
+    }
+  }
+}
+```
+
+The store is normalized. Relay updates the `me` record so that the `best_friend` linked field points to the user with ID 2. The only information Relay has about that user is the age. `MyQuery` rerenders, and Relay cannot find the `name` of the user with ID 2. A relationship "change" can also be a new relationship: you start with no best friend, and a later response returns a best friend without all the fields your component needs.
+
+Relay could refetch your query in this state. Some queries are not safe to re-issue arbitrarily, and a UI state change that is not tied to a direct user action can lead to confusion. For this reason Relay does not refetch in this scenario.
+
+How to tell: place a breakpoint or `console.log` at the final return statement of `readWithIdentifier` in `FragmentResource`. At this point Relay knows that it is missing data and no query is in flight to get it.
+
+### 3. Inconsistent server response
+
+This is a rare edge case. If the server does not implement the [field stability](https://graphql.org/learn/global-object-identification/#field-stability) semantics of the id field, a field can be present in one part of the response and explicitly null in another:
+
+```graphql
+{
+  me {
+    id: 1
+    name: "Alice"
+  }
+  me_elsewhere_in_the_graph {
+    id: 1 # Note this is the same as the `me` field above...
+    name: null
+  }
+}
+```
+
+Relay first learns that the `name` of user 1 is Alice, and later finds that it is `null`. User 1 can have only one value for `name` in the normalized store, so Relay ends with `name` as `null`.
+
+How to tell: Relay detects this case and logs an error to the console in dev.
+
+You can also inspect the query response manually.
+
+If the unstable field is a linked field (an edge to another object), this bug can cause a Graph Relationship Change within a single response. For example, a user with the same `id` appears in two places in the response, and their `best_friend` is different in those two places. Relay shows a similar console warning in dev.
+
+### 4. Client-side deletion or incomplete update
+
+Imperative store updates or optimistic updates can delete a record or field. An imperative or optimistic update that writes a new record to the store may not supply a value for a field you expect to read. An updater cannot statically know all the data that is accessed off a new object.
+
+How to tell: because of React and Relay batching, you cannot always associate a component update with the store update that triggered it. Set a breakpoint in your component for when your value is null, and use the Relay DevTools to look at the last few updates.
+
+This can happen for a newly created object that did not supply a specific field, or for an update that causes a new or changed relationship in the graph. In the second case, use the "How to tell" tip of the Graph Relationship Change section.
 
 ---
 
-## Reading generated artifacts
+## Stale generated artifacts
 
-Every `graphql` tagged template compiles to a file in `__generated__/`. Reading it answers "what does Relay think my query looks like?"
+Relay depends on ahead-of-time compilation of GraphQL queries and fragments to generate artifacts. The compiler generates TypeScript/Flow types and additional JavaScript code that Relay's Babel plugin includes in your code.
 
-### File layout
+If the artifacts are out of date, pass `--validate` to the compiler. It checks whether any generated artifacts are out of date without writing anything to disk. The compiler exits with a non-zero code if any artifact needs an update. This is useful in CI to assert that generated files are committed and current:
 
+```sh
+relay-compiler --validate
 ```
-src/components/UserCard.tsx
-src/components/__generated__/UserCard_user.graphql.ts
-```
-
-The artifact exports:
-
-- `node` — the `ReaderFragment` or `ConcreteRequest` Relay executes.
-- Type exports — `UserCard_user$data`, `UserCard_user$key`.
-
-### What to check
-
-- `node.selections` — the exact field list. If a field you wrote isn't here, your edit didn't reach the compiler (cache issue: delete `__generated__` and rerun).
-- `node.argumentDefinitions` — variables the fragment accepts.
-- For queries, `params.text` is the serialized query string sent to the server. Paste it into GraphiQL to test the server independently.
-- `node.metadata.connection` — connection config for `@connection` fragments.
-
-### Stale artifact symptoms
-
-- Added `@required` but no `required` field in `node.selections`.
-- Renamed a fragment but the old artifact still exists.
-- Imports resolve but types don't match runtime data.
-
-Fix: `rm -rf src/**/__generated__` then `yarn relay`.
 
 ---
 
 ## Common compiler errors
 
-### Duplicate fragment name
+### Disallowed `id` type
 
 ```
-Error: Duplicate definition for fragment `UserCard_user`.
+Disallowed type `String` of field `id` on parent type `Foo` cannot be used by Relay to identify entities
 ```
 
-Two files define the same fragment. Fragment names must be globally unique across the project. Convention: `ComponentName_propName`.
+The GraphQL schema defines an object with a field named `id` that has no valid type. Valid types for this field are `ID` or `ID!` unless configured otherwise. The Relay compiler and runtime mishandle such a field and cause refresh or data updating issues. Components can fail to re-render on re-fetched data.
 
-### Invalid `@connection`
+Relay uses Object Identification to know which GraphQL objects to refetch. These objects usually implement the `Node` interface and come with an `id` field of type `ID`. By default, Relay does not restrict object definitions, so `id` fields with non-`ID` types (for example `String`) can be defined. The runtime and compiler handle only `id` fields as the `Node` interface defines them.
 
+Fix, with 2 recommended courses of action:
+
+- Type all fields named `id` with `ID`.
+- Rename any field named `id` (with a type that is not `ID`) to a different name, for example `special_purpose_id`.
+
+If your application requires the `id` field definition to stay as is, add your GraphQL type and the type of its `id` field to the allowlist in `nonNodeIdFields` of the Relay Compiler's configuration. This bypasses the error only for that combination of object type and `id` field type.
+
+---
+
+## Field-level error logging
+
+The `log` option of `Environment` is a function that Relay calls with telemetry events. The `LogEvent` type lists the events.
+
+These `LogEvent` events exist in v21 only (absent in v20.1):
+
+- `suspense.resolver`, `suspense.client_edge`, `suspense.missing_data`
+- `reader.fragmentSpread`, `reader.read`, `fetchquery.fetch`
+- `store.datachecker.missing`, `store.batch.start`, `store.batch.complete`
+
+### `relayFieldLogger`
+
+Relay features such as `@required`, `@catch`, `@throwOnFieldError` and Relay Resolvers handle field errors. To track and monitor these errors, configure the Relay Environment with a `relayFieldLogger`. The logger is a function that Relay calls with an event each time it handles a field-level error.
+
+```ts
+import {Environment} from "relay-runtime";
+
+const environment = new Environment({
+    relayFieldLogger: (event) => {
+        switch(event.kind) {
+            case "missing_expected_data.log":
+                // ...
+                break;
+            // ... handle other events
+        }
+    },
+    network: // ...
+    store: // ...
+});
 ```
-Error: Expected the `key` argument to `@connection` to be a string literal.
+
+The logger receives 6 event kinds. `owner` is the name of the operation or fragment. `fieldPath` is the `.` separated path from its root to the field.
+
+| `event.kind` | When it fires |
+|---|---|
+| `missing_expected_data.log` | The store lacks data that the parent query, mutation or subscription requested. Graph relationship changes or imperative updates that do not provide all needed data cause this. Relay renders the field as `undefined`. |
+| `missing_expected_data.throw` | The same, in a query, fragment or mutation with `@throwOnFieldError`. Relay throws after the logger returns. |
+| `missing_required_field.log` | A `@required(action: LOG)` field is null or missing in the store. |
+| `missing_required_field.throw` | A `@required(action: THROW)` field is null or missing in the store. Relay throws after the logger returns. |
+| `relay_resolver.error` | A Relay Resolver threw a JavaScript error when it was last evaluated. By default Relay coerces the value to null. |
+| `relay_field_payload.error` | The GraphQL response marks a field being read as in an error state. |
+
+The `.throw`, `relay_resolver.error` and `relay_field_payload.error` events carry `handled`. Throw a custom error from the logger only when `handled` is `false`. A `@catch` directive or a null resolver result sets `handled` to `true`.
+
+---
+
+## Compiler Tooling Reference
+
+### Config file locations
+
+The compiler looks for a Relay config in these locations (v20.1 and v21.0.1 docs):
+
+1. `relay.config.json` in the project root
+2. `relay.config.(js|mjs|ts)` in the project root
+3. A `"relay"` key in `package.json`
+
+Pass a config file path as the positional `[CONFIG]` argument.
+
+### Compiler CLI flags
+
+| Flag | v20.1.1 | v21.0.1 | Effect |
+|---|---|---|---|
+| `--watch` | yes | yes | Recompile on change. Needs watchman. |
+| `--project`, `-p` | yes | yes | Compile only this project. Repeat for several. |
+| `--validate` | yes | yes | Exit non-zero when artifacts are out of date. Write nothing. |
+| `--noWatchman` | absent | yes | Use directory traversal and skip watchman. The v21 docs write `--no-watchman`; the clap definition uses camel case, so the source name is `--noWatchman`. The env variable `FORCE_NO_WATCHMAN` has the same effect on both versions. |
+| `codemod <cmd>` | yes (2 commands) | yes (3 commands) | `fix-all` is absent on v20.1.1. |
+| `experimental-compare-document-ir` | absent | yes | Compare the IR of two documents. Experimental. |
+
+`relay-compiler --help` and `relay-compiler <subcommand> --help` print the full command-line reference.
+
+### Document comparison (v21 only, experimental)
+
+`relay-compiler experimental-compare-document-ir --left <doc> --right <doc> --schemaPaths <schema>...` checks that every selection of `--left` exists in `--right`. Each document holds exactly 1 operation. The compiler inlines fragments, de-aliases fields, deduplicates fields, and treats `user(id: $id)` as a superset of `user(id: 100)`. The output lists the missing selections with line numbers and paths, for example `* query -> viewer -> timezone_estimate -> gmt_offset`. Pass the expected document via `--right` and the generated document via `--left` to find extra selections (over-fetching).
+
+### Codemods
+
+`relay-compiler codemod <name>` runs one of: `mark-dangerous-conditional-fragment-spreads` (option `-r`/`--rollout-percentage`), `remove-unnecessary-required-directives` and `fix-all` (v21 only). `fix-all` runs all Relay compiler transforms and applies fixes for every fixable diagnostic. Run it after you update the Relay version.
+
+### VS Code extension and LSP
+
+The [Relay VS Code extension](https://marketplace.visualstudio.com/items?itemName=meta.relay) uses the Language Server Protocol of the Relay compiler. It surfaces compiler errors as editor problems, often with suggested quick fixes. It provides autocomplete in `graphql` tagged template literals, hover information about Relay-specific features, strikethrough rendering of `@deprecated` fields, and click-to-definition for fragments, fields and types.
+
+### ESLint plugin (`eslint-plugin-relay`)
+
+| Rule | Checks |
+|---|---|
+| `relay/unused-fields` | Each selected field is used in the module that selects it. |
+| `relay/must-colocate-fragment-spreads` | A module imports the module that defines each fragment it spreads. Depends on globally unique module names. |
+| `relay/no-future-added-value` | Code does not handle the `%future added value` enum placeholder. |
+| `relay/graphql-syntax` | Each `graphql` tag parses. |
+| `relay/graphql-naming` | Fragment and operation names follow the Relay naming rules. |
+| `relay/function-required-argument` | `readInlineData` gets an explicit argument. |
+| `relay/hook-required-argument` | Relay hooks get an explicit argument. |
+
+Config: `relay.configs['ts-recommended'].rules` in `eslint.config.js`. Suppress `unused-fields` and `must-colocate-fragment-spreads` with `# eslint-disable-next-line relay/<rule>` on the line before the field. `eslint-disable-line` does not work inside `graphql` tags.
+
+### Babel plugin with `artifactDirectory`
+
+When the compiler config sets `artifactDirectory`, the Babel plugin needs the same value:
+
+```json
+{
+  "plugins": [["relay", { "artifactDirectory": "./src/__generated__" }]]
+}
 ```
 
-`@connection(key: $keyVar)` not allowed — must be a string literal. Also: key must match pattern `<FragmentName>_<fieldName>`.
-
-### `@refetchable` without `Node`
-
-```
-Error: @refetchable fragments must be on a type that implements Node or Viewer.
-```
-
-Add `Node` interface implementation to the type in your schema, or use `@refetchable(queryName: "…")` on a fragment whose type has a unique identifier.
-
-### Missing `id` on connection node
-
-```
-Error: Expected connection edge node to have an `id` selection.
-```
-
-Add `node { id }` to the connection's edge selection. Relay needs `id` to deduplicate edges.
-
-### Circular fragment spread
-
-```
-Error: Fragment `A` spreads fragment `B` which spreads fragment `A`.
-```
-
-Break the cycle — one fragment should not transitively include itself.
+The `"relay"` plugin must run before other plugins or presets. The docs name framework plugins for Vite, Next.js and SWC.
 
 ---
 
 ## Diagnostic flowchart
 
-| Symptom | First check | Second check | Fix |
-|---|---|---|---|
-| Console: inconsistent `__typename` | DevTools store inspector for the ID | Are two types sharing raw IDs? | Encode typename into ID on server, or set `getDataID` on Store |
-| `Expected a handler for deleteRecord` | Custom `handlerProvider` passed? | Does it cover all mutation handles? | Register `MutationHandlers.*` handlers |
-| `@appendEdge` inserts but list doesn't update | Connection ID in store | Does mutation's `connections` array match exactly? | Use `ConnectionHandler.getConnectionID` with same filters |
-| Field null in component | DevTools Network response | Is value null in raw payload? | Fix server resolver or add field to fragment |
-| Field null after navigation | DevTools store inspector | Record evicted by GC? | Increase `gcReleaseBufferSize` or retain with `useQueryLoader` |
-| Non-null schema field is null | Is `@required` on a child? | `action: LOG` or `THROW`? | Downgrade to `NONE` or add error boundary |
-| `data.field` is undefined | Fragment selections in `__generated__` artifact | Is the field present? | Re-run `relay-compiler` |
-| Compiler: Unknown fragment | Is file under `src` glob? | Is it in `exclude`? | Update `relay.config.json` |
-| Compiler: type has no field X | Schema file fresh? | Pointed at right `.graphql`? | Update schema, rerun compiler |
-| Works locally, fails in CI | `__generated__` in git? | Is `relay-compiler` in CI? | Add `yarn relay` before build |
-| Fragment read returns wrong shape | Which ref passed to `useFragment`? | Is it from a `...Fragment_x` spread? | Pass spread ref, not raw data |
-| Mutation works, store not updated | Is response shape matching fragment? | Are IDs globally unique? | Ensure response selects `id` and all fragment fields |
-| Subscription fires but no rerender | Network panel shows payload? | Store inspector shows updated record? | Check subscription selects full fragment |
-| Duplicate fragment error | Two files with same fragment name | Rename one | Use `Component_propName` convention |
-| @refetchable error | Type implements `Node`? | Has `id: ID!`? | Implement `Node` in schema |
-| Console warning: missing expected data | Which fragment owner? | Recent mutation touched record? | Select all required fields in mutation response |
+| Symptom | First check | Fix |
+|---|---|---|
+| Console: inconsistent `__typename` | Do 2 types share a raw ID? | Prefix the ID of the less widely used type with a unique string and base64 encode it |
+| `Expected a handler for deleteRecord` | Is a custom `handlerProvider` passed? | Return the `MutationHandlers.*` handlers |
+| Field null in component | Response in the DevTools network panel | If null in the response, fix the server. Otherwise check for a graph relationship change or a client-side update |
+| Console: two instances of the same id | Inspect the query response | Fix the field stability of the server |
+| Works locally, fails in CI | Are generated artifacts committed and current? | Run `relay-compiler --validate` |
+| Compiler: disallowed `id` type | Type of the `id` field in the schema | Type the field as `ID`, rename it, or list it in `nonNodeIdFields` |
