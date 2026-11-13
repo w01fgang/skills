@@ -63,7 +63,7 @@ export const environment = new Environment({
 | `missingFieldHandlers` | `MissingFieldHandler[]` | Lets Relay satisfy missing scalars / linked records from adjacent data (e.g. treat `node(id:$x)` as already cached if `User:$x` exists). |
 | `isServer` | `boolean` | Disables client-only optimizations; set `true` during SSR. |
 | `treatMissingFieldsAsNull` | `boolean` | If `true`, the response normalizer writes `null` for each field that the response omits. Set it when the server skips fields with `null` values. With `false`, the normalizer leaves the field unset and logs a dev warning. |
-| `log` | `(event: LogEvent) => void` | Receives lifecycle events: `queryresource.fetch`, `network.start/next/complete/error`, `execute.start/next/error/complete`, `store.publish`, `store.gc`, etc. Use for metrics. |
+| `log` | `(event: LogEvent) => void` | Receives lifecycle events: `queryresource.fetch`, `network.start/next/complete/error`, `execute.start/next.start/next.end/error/complete`, `store.publish`, `store.gc.start/interrupted/end`, etc. Use for metrics. |
 | `relayFieldLogger` | `(event) => void` | Receives field events: `missing_required_field.log` / `.throw`, `missing_expected_data.log` / `.throw`, `relay_resolver.error`, `relay_field_payload.error`. |
 | `scheduler` | `TaskScheduler` | Custom scheduler for batching store notifications (e.g. `unstable_batchedUpdates`). |
 | `getDataID` | `(fieldValue, typeName) => string` | Override Relay's default identity (default reads `id`). Useful for composite keys. |

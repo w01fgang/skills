@@ -162,7 +162,7 @@ Checklist:
 ### Edge deletion doesn't remove item
 
 - `@deleteEdge(connections: $ids)` deletes by node ID. The mutation response must return the deleted node's `id` field.
-- `@deleteRecord` removes the record from the store entirely. Any component still referencing it will see fields as null.
+- `@deleteRecord` deletes the record from the store. An edge that still points to the record reads `undefined`.
 
 ---
 

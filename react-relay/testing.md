@@ -30,7 +30,7 @@ The `.mock` controller on the environment exposes:
 | `complete(request)` | Complete a request previously fed with `nextValue`. |
 | `resolve(request, data)` | `nextValue` + `complete`. |
 | `reject(request, error)` | Fail a specific request. |
-| `queueOperationResolver(resolver)` | Auto-resolve subsequent operations. |
+| `queueOperationResolver(resolver)` | Queue a resolver that resolves 1 later operation. |
 | `queuePendingOperation(query, variables)` | Pre-seed an operation so `usePreloadedQuery` will not suspend indefinitely. |
 | `isLoading(request, variables, cacheConfig?)` | `true` if pending. |
 | `cachePayload(request, vars, payload)` | Seed the QueryResponse cache. |
@@ -274,7 +274,7 @@ environment.mock.rejectMostRecentOperation(op =>
 
 ### `queueOperationResolver` (auto-resolve)
 
-Register a resolver that fires for each operation as it is sent:
+Register a resolver that fires for the next operation as it is sent. The resolver leaves the queue when it returns a payload or an error:
 
 ```ts
 environment.mock.queueOperationResolver(operation =>
@@ -815,7 +815,7 @@ Relay generates artifacts via `relay-compiler`. Run it before tests. The Jest tr
 | Scalar resolvers ignored | Missing `@relay_test_operation` directive | Add `@relay_test_operation` to the query used in tests. |
 | Payload shape mismatch errors | Mock resolver returned extra/missing fields for a type | Omit unknown fields; let `MockPayloadGenerator` fill the rest. |
 | `act()` warnings in console | State update not wrapped | Wrap the resolve/reject call in `act(() => { ... })`. |
-| Duplicate IDs across pagination pages | `generateId()` restarts per resolver call | Offset IDs explicitly per page in the resolver. |
+| Duplicate IDs across pagination pages | `generateId()` restarts for each `generate()` call | Offset IDs explicitly per page in the resolver. |
 | Cache bleeds between tests | Reused environment | Create a new `createMockEnvironment()` in `beforeEach`. |
 | `loadQuery` inside `useEffect` not fetching | Immediate never flushed | `act(() => jest.runAllImmediates())` after render. |
 | "Operation not found" in `findOperation` | Predicate too strict or query name differs | Log `getAllOperations().map(o => o.fragment.node.name)` and match exactly. |

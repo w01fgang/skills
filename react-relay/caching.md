@@ -597,7 +597,7 @@ Mounted readers of that record should use `useSubscribeToInvalidationState` to r
 
 - **Relay DevTools** (browser extension): inspect the `RecordSource`, list retained operations, see invalidation state per record.
 - **`environment.getStore().getSource().toJSON()`** dumps the full normalized record map — useful in tests or ad-hoc assertions.
-- **`environment.check(operationDescriptor)`** returns `'available' | 'missing' | 'stale'` for a given query without triggering a fetch. Handy for writing custom routing pre-checks.
+- **`environment.check(operationDescriptor)`** returns `{status: 'available', fetchTime}`, `{status: 'missing'}` or `{status: 'stale'}` for a given query without triggering a fetch. Handy for writing custom routing pre-checks.
 
 ---
 
