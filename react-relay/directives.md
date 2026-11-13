@@ -936,8 +936,9 @@ fragment Foo_assignable_user on User @assignable { __typename }
 | `featureFlags.disallow_required_action_throw_on_semantically_nullable_fields` | `@required` | Rejects `THROW` on nullable fields that lack `@semanticNonNull`. Default `disabled`. v21 only. |
 | `featureFlags.allow_legacy_relay_resolver_tag` | resolver docblocks | Accepts `@RelayResolver` as an alias of `@relayType` / `@relayField`. Default `disabled`. v21 only. |
 
-Source: `relay-compiler-config-schema.json` and
-`compiler/crates/common/src/feature_flags.rs` at tags v20.1.1 and v21.0.1. A flag value is `{ "kind": "enabled" }`,
+Source at tags v20.1.1 and v21.0.1:
+`compiler/crates/relay-compiler/relay-compiler-config-schema.json` for the option names, and
+`compiler/crates/common/src/feature_flags.rs` for the flags of each tag and their defaults. A flag value is `{ "kind": "enabled" }`,
 `{ "kind": "disabled" }` or a rollout (`{ "kind": "rollout", "rollout": 20 }`).
 
 ## Directive definitions that differ between v20 and v21
