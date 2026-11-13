@@ -17,7 +17,7 @@ Use resolvers when state is:
 
 ## Enabling
 
-Resolvers need no compiler feature flag. Run the compiler (`relay-compiler`). It reads each docblock that has a `@relayType` or `@relayField` tag and ignores all other docblocks. It generates artifacts alongside your fragments.
+Resolvers need no compiler feature flag. Run the compiler (`relay-compiler`). It reads each docblock that has a resolver tag (see the table below for your version) and ignores all other docblocks. It generates artifacts alongside your fragments.
 
 Configure `relayFieldLogger` on the Environment to record errors that resolver functions throw:
 
@@ -33,18 +33,28 @@ const environment = new Environment({
 });
 ```
 
-### Docblock tags (Relay v21)
+### Docblock tags
+
+**The tag depends on the Relay version.** Check `relay-compiler` in `package.json`.
+
+| | Relay v20 | Relay v21 |
+| --- | --- | --- |
+| Type | `@RelayResolver Todo` | `@relayType Todo` |
+| Field | `@RelayResolver Todo.text: String` | `@relayField Todo.text: String` |
+
+The v20 compiler reads a docblock only when it has the `@RelayResolver` tag, and the v21 compiler only when it has `@relayType` or `@relayField`. The examples in this file use the v21 tags. On v20, write `@RelayResolver` in their place; the function, the other tags and the rest of the docblock are the same.
+
+To migrate from v20 to v21, run `relay-compiler codemod fix-all` (v21 only). To keep `@RelayResolver` on v21 during a migration, enable the `allow_legacy_relay_resolver_tag` feature flag in the compiler config.
+
+These tags are the same in v20 and v21:
 
 | Tag | Defines |
 | --- | --- |
-| `@relayType TypeName` | A client type. Add `@weak` for a type without an ID. |
-| `@relayField TypeName.fieldName: FieldType` | A field on a type. |
+| `@weak` | A type without an ID. |
 | `@rootFragment FragmentName` | The data that a derived field reads. |
 | `@live` | A field or strong type whose value changes over time. |
 | `@deprecated reason` | A deprecated field. |
 | Free text in the docblock | The description of the type or field. |
-
-Relay v20 and earlier used the single tag `@RelayResolver` for types and fields. To migrate, run `relay-compiler codemod fix-all`. To keep the old tag during a migration, enable the `allow_legacy_relay_resolver_tag` feature flag in the compiler config.
 
 ## Defining Fields
 

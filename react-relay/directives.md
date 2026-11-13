@@ -431,7 +431,7 @@ fragment UserEmail_user on User {
 | `NONE`   | Parent linked field becomes null |
 | `LOG`    | Same as `NONE` plus a `missing_required_field.log` event to `relayFieldLogger` |
 | `THROW`  | Reading the fragment throws |
-| `DANGEROUSLY_THROW_ON_SEMANTICALLY_NULLABLE_FIELD` | Same as `THROW`, allowed on nullable fields when the `disallow_required_action_throw_on_semantically_nullable_fields` feature flag is on. A migration aid; avoid new uses. |
+| `DANGEROUSLY_THROW_ON_SEMANTICALLY_NULLABLE_FIELD` | v21 only. Same as `THROW`, allowed on nullable fields when the `disallow_required_action_throw_on_semantically_nullable_fields` feature flag is on. A migration aid; avoid new uses. |
 
 **Pitfalls**
 - `@required` applies to the reader, not the network — the field is still
@@ -563,11 +563,13 @@ if (data.actor.asUser != null) {
 ## Resolvers
 
 Resolver tags live in **docblock comments** on exported TS/JS functions and
-types in files the Relay compiler scans. The compiler reads a docblock only
-when it has a `@relayType` or `@relayField` tag. Relay v20 and earlier used the
-single tag `@RelayResolver`; `relay-compiler codemod fix-all` migrates it.
+types in files the Relay compiler scans. **The tag depends on the Relay
+version:** v21 reads `@relayType` and `@relayField`; v20 reads the single tag
+`@RelayResolver` for both. The examples below use the v21 tags. On v20, write
+`@RelayResolver` in their place. `relay-compiler codemod fix-all` (v21 only)
+migrates the tags.
 
-### `@relayField` and `@relayType`
+### `@relayField` and `@relayType` (v20: `@RelayResolver`)
 
 `@relayField` defines a field. `@relayType` defines a client type.
 
@@ -800,8 +802,8 @@ import { MatchContainer } from "react-relay";
 | `@catch`               | field / fragment / query / mutation             | Catch field errors into result |
 | `@semanticNonNull`     | schema field definition                         | Mark field non-null except on errors |
 | `@alias`               | fragment spread / inline fragment               | Null-safe nested access |
-| `@relayField`          | docblock                                        | Define resolver field |
-| `@relayType`           | docblock                                        | Define resolver type |
+| `@relayField`          | docblock                                        | Define resolver field (v20: `@RelayResolver`) |
+| `@relayType`           | docblock                                        | Define resolver type (v20: `@RelayResolver`) |
 | `@rootFragment`        | docblock                                        | Data a derived resolver reads |
 | `@weak`                | docblock                                        | Value-object model without id |
 | `@live`                | docblock                                        | Live resolver (LiveState<T>) |

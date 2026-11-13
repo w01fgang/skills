@@ -13,6 +13,24 @@ description: Use when working with Relay in a React app — writing fragments, q
 - **Normalized store.** Records are keyed by `id`. Mutating a record re-renders every subscriber across the app. The compiler adds the `id` selection for you.
 - **Render-as-you-fetch.** Start the network request in an event handler / route loader, pass a query reference down, suspend on read. Prefer this over a fetch during render.
 
+## Version check — do this first
+
+Read the `react-relay` and `relay-compiler` versions in `package.json`. This skill describes Relay v21.0.1 and marks each item that differs in v20. Everything without a version mark works the same in v20.1 and v21.
+
+| Item | Relay v20 | Relay v21 |
+|---|---|---|
+| Resolver docblock tag | `@RelayResolver TypeName` and `@RelayResolver Type.field: T`. The compiler ignores `@relayType` / `@relayField`. | `@relayType TypeName` and `@relayField Type.field: T` |
+| TypeScript types | Install `@types/react-relay` and `@types/relay-runtime` | Shipped in the packages (from 21.0.1). Remove the `@types` packages. |
+| `relay-compiler codemod fix-all` | Absent | Present |
+| `relay-compiler --noWatchman` | Absent | Present (from 21.0.1) |
+| `@required(action: DANGEROUSLY_THROW_ON_SEMANTICALLY_NULLABLE_FIELD)` | Absent | Present |
+| `@catch` on a `@connection` field or a client edge field | Not supported | Supported |
+| `@live_query` | Present | Removed. Use `@client_polling(interval:)` or `@live`. |
+| `@oneOf` input types | Object type with all-optional fields | Union type that permits 1 property; `"oneOfType": "ignore"` restores the object type |
+| `react-relay/rsc_EXPERIMENTAL` | Absent | Present, experimental |
+
+The resolver examples in [resolvers.md](./resolvers.md) and [directives.md](./directives.md) use the v21 tags. On v20, write `@RelayResolver` in place of `@relayType` and `@relayField`; the rest of each docblock is the same.
+
 ## Navigation — which file to read
 
 | Topic | File | When |
@@ -22,7 +40,7 @@ description: Use when working with Relay in a React app — writing fragments, q
 | Mutations, connections, optimistic UI | [updating-data.md](./updating-data.md) | Writing mutations or modifying the store |
 | Fetch policies, GC, staleness | [caching.md](./caching.md) | Choosing fetch policy or debugging cache behavior |
 | Custom fetch, auth, subs transport, persisted queries | [network.md](./network.md) | Configuring Network layer or server integration |
-| Client-side derived state, live fields | [resolvers.md](./resolvers.md) | Using `@relayField` / `@relayType` |
+| Client-side derived state, live fields | [resolvers.md](./resolvers.md) | Using `@relayField` / `@relayType` (v21) or `@RelayResolver` (v20) |
 | EntryPoint APIs, code-split routing | [entrypoints.md](./entrypoints.md) | Route-level preloading |
 | Imperative APIs (outside React) | [runtime.md](./runtime.md) | `fetchQuery`, `commitMutation`, `Store`, `Environment` |
 | Testing components, mocking payloads | [testing.md](./testing.md) | Writing Jest/RTL tests |
