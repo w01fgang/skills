@@ -65,9 +65,6 @@ function UserComponent(props: Props) {
     graphql`
       fragment UserComponent_user on User {
         name
-        profile_picture(scale: 2) {
-          uri
-        }
       }
     `,
     props.user,
@@ -106,6 +103,17 @@ function QueryFetcherExample() {
       <Button onClick={() => loadQuery({})}> Click to reveal the name </Button>
     );
   }
+
+  return (
+    <>
+      <Button onClick={disposeQuery}>
+        Click to hide the name and dispose the query.
+      </Button>
+      <React.Suspense fallback="Loading">
+        <NameDisplay queryReference={queryReference} />
+      </React.Suspense>
+    </>
+  );
 }
 
 function NameDisplay({ queryReference }) {
@@ -114,27 +122,11 @@ function NameDisplay({ queryReference }) {
   return <h1>{data.user?.name}</h1>;
 }
 ```
-Render `NameDisplay` inside `<React.Suspense>` when `queryReference` is not null.
+The docs example calls `loadQuery({})`. Pass the variables that the query declares.
 
-### Mutate
+### Mutate, paginate and refetch
 
-```js
-  const [commit, isInFlight] = useMutation<FeedbackLikeMutation>(graphql`
-    mutation FeedbackLikeMutation($input: FeedbackLikeData!) {
-      feedback_like(data: $input) {
-        feedback {
-          id
-          viewer_does_like
-          like_count
-        }
-      }
-    }
-  `);
-```
-Add item to a list → use `@appendEdge(connections: $connections)` on the mutation payload.
-
-### Paginate and refetch
-
+- Mutate: `useMutation`. Example: [hooks.md](./hooks.md). Add item to a list → use `@appendEdge(connections: $connections)` on the mutation payload.
 - Paginate: `usePaginationFragment`. The fragment needs `@refetchable(queryName: "...")` and `@connection(key: "...")`. Example: [hooks.md](./hooks.md).
 - Refetch with new variables: `useRefetchableFragment`. Example: [hooks.md](./hooks.md).
 
