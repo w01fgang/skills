@@ -563,6 +563,10 @@ const { data, edges, loadNext, hasNext, isLoadingNext, refetch } =
   usePrefetchableForwardPaginationFragment(
     graphql`
       fragment FriendsList_user on User
+      @argumentDefinitions(
+        count: { type: "Int", defaultValue: 10 }
+        cursor: { type: "String" }
+      )
       @refetchable(queryName: "FriendsListPaginationQuery") {
         friends(first: $count, after: $cursor)
           @connection(key: "FriendsList_user_friends", prefetchable_pagination: true) {

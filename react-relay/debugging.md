@@ -220,7 +220,7 @@ fragment User_profile on User {
 - `action: LOG` — parent becomes null; `missing_required_field.log` event fires via the environment's field logger.
 - `action: THROW` — throws during render; requires an error boundary.
 
-Each `@required` action bubbles null to the parent. If the parent is non-null in the schema, Relay makes the fragment root `null` — the whole component gets `data === null`. Remove `@required` to see raw nulls while debugging.
+`NONE` and `LOG` bubble null to the parent. If the parent is non-null in the schema, Relay makes the fragment root `null` — the whole component gets `data === null`. Remove `@required` to see raw nulls while debugging.
 
 ### 6. Check client-side updates
 
@@ -434,14 +434,6 @@ Error: @refetchable fragments must be on a type that implements Node or Viewer.
 ```
 
 Add `Node` interface implementation to the type in your schema, or use `@refetchable(queryName: "…")` on a fragment whose type has a unique identifier.
-
-### Missing `id` on connection node
-
-```
-Error: Expected connection edge node to have an `id` selection.
-```
-
-Add `node { id }` to the connection's edge selection. Relay needs `id` to deduplicate edges.
 
 ### Circular fragment spread
 

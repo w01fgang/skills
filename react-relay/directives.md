@@ -662,10 +662,12 @@ compiler requires `@waterfall` on each read of such a field.
 /**
  * @relayField Post.author: User
  */
-export function author(post: PostModel): { id: DataID } {
-  return { id: post.authorId };
+export function author(post: PostModel): DataID {
+  return post.authorId;
 }
 ```
+
+`User` is a server type that implements `Node`. The resolver returns its ID.
 
 ```graphql
 fragment PostByline_post on Post {
