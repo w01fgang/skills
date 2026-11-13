@@ -52,7 +52,7 @@ const testQuery = graphql`
 `;
 ```
 
-Without the directive, resolvers by type still work for concrete object types but scalar resolution loses field context.
+Without the directive, resolvers by type still work for concrete object types, and each scalar other than `ID` maps to `String`. Mock resolvers for `Int`, `Float`, `Boolean`, custom scalars and abstract types need `@relay_test_operation`.
 
 ## `createMockEnvironment()`
 

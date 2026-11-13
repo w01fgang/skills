@@ -429,9 +429,11 @@ data visible while the new data is loading.
 
 ### Pitfalls
 
-- Missing `@refetchable` directive — compilation fails.
+- Missing `@refetchable` directive — the hook throws an error.
 - Fragment must be on `Viewer`, `Query`, or a type implementing `Node`.
 - Variables you omit fall back to the values from the original parent query.
+- If the fragment key is optional, pass all non-optional variables to
+  `refetch`, including the object's ID.
 - `refetch` re-renders the component; if you are not inside a transition,
   the subtree can suspend and replace the UI with the fallback.
 
@@ -528,9 +530,11 @@ export function FriendsList({ userRef }: Props) {
 
 ### Suspense behavior
 
-- `loadNext` and `loadPrevious` never suspend. They set
-  `isLoadingNext` / `isLoadingPrevious`, then append results to the
-  connection.
+- `loadNext` and `loadPrevious` do not suspend the component that calls
+  them. They set `isLoadingNext` / `isLoadingPrevious`, then append results
+  to the connection. New child components that render the added items can
+  suspend, so wrap the list in `Suspense` and call `loadNext` inside
+  `startTransition`.
 - `refetch` suspends the same way `useRefetchableFragment`'s does (wrap in
   `startTransition` to avoid fallback flashes).
 - The component suspends if fragment data is missing while a parent query is
@@ -545,6 +549,37 @@ export function FriendsList({ userRef }: Props) {
 - Calling `loadNext` while one is already in flight is a no-op.
 - Only pagination variables change between loads — other variables are
   locked to whatever the parent query fetched.
+
+---
+
+## usePrefetchableForwardPaginationFragment
+
+Experimental. Works like `usePaginationFragment` for forward pagination, and
+prefetches `bufferSize` items that it holds back from display. `loadNext`
+takes items from that buffer first.
+
+```tsx
+const { data, edges, loadNext, hasNext, isLoadingNext, refetch } =
+  usePrefetchableForwardPaginationFragment(
+    graphql`
+      fragment FriendsList_user on User
+      @refetchable(queryName: "FriendsListPaginationQuery") {
+        friends(first: $count, after: $cursor)
+          @connection(key: "FriendsList_user_friends", prefetchable_pagination: true) {
+          edges { node { name } }
+        }
+      }
+    `,
+    userRef,
+    bufferSize,
+    // optional: initialSize, prefetchingLoadMoreOptions, minimumFetchSize
+  );
+```
+
+- Set `prefetchable_pagination: true` on `@connection`; the hook throws
+  without it.
+- Render from the returned `edges`. The edges in `data` include the buffer.
+- `isLoadingNext` stays `false` during an automatic prefetch.
 
 ---
 

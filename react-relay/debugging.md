@@ -53,10 +53,10 @@ Mutations and subscriptions appear in the same list, tagged by kind. For subscri
 Console error during normalization of a response:
 
 ```
-RelayResponseNormalizer: Invalid record. Expected __typename to be consistent,
-but the record was assigned conflicting types User and MessagingParticipant.
-The GraphQL server likely violated the globally unique id requirement by
-returning the same id for different objects.
+RelayResponseNormalizer: Invalid record '543'. Expected __typename to be
+consistent, but the record was assigned conflicting types User and
+MessagingParticipant. The GraphQL server likely violated the globally unique
+ID requirement by returning the same ID for different objects.
 ```
 
 The store then contains a corrupted record. Subsequent fragment reads may return stale fields from the previous type.
@@ -181,14 +181,18 @@ If the field is not in the fragment, `data.avatarUrl` is `undefined` (TypeScript
 
 Relay's store is normalized. A component reads `viewer.bestFriend.name`. Later, another query/mutation updates `viewer.bestFriend` to point at a different `User` record whose `name` was never fetched. The component re-renders with `name: null`.
 
-Console warning in development:
-
-```
-RelayResponseNormalizer: Invalid record `User:17`. Expected field `name`
-to be present but it was not found.
-```
+Relay prints no warning for this case. To confirm it, log the result at the final return statement of `readWithIdentifier` in `FragmentResource`, or inspect the record in the DevTools store panel.
 
 Fix: ensure every query/mutation/subscription that can change the relationship selects all fields downstream components need. Use a shared fragment.
+
+A different case has a console error: the server returns the same `id` 2 times in one response with different field values. Relay logs in development:
+
+```
+RelayResponseNormalizer: Invalid record. The record contains two instances of
+the same id: 1 with conflicting field, name and its values: Alice and null.
+```
+
+Fix that on the server.
 
 ### 4. Check garbage collection
 
@@ -212,11 +216,11 @@ fragment User_profile on User {
 }
 ```
 
-- `action: NONE` — null allowed, no action.
+- `action: NONE` — null is expected; parent becomes null, no log event.
 - `action: LOG` — parent becomes null; `missing_required_field.log` event fires via the environment's field logger.
 - `action: THROW` — throws during render; requires an error boundary.
 
-A `@required(action: LOG)` field bubbles null to the parent. If the parent is non-null in the schema, Relay makes the fragment root `null` — the whole component gets `data === null`. Remove `@required` or downgrade to `NONE` to see raw nulls while debugging.
+Each `@required` action bubbles null to the parent. If the parent is non-null in the schema, Relay makes the fragment root `null` — the whole component gets `data === null`. Remove `@required` to see raw nulls while debugging.
 
 ### 6. Check client-side updates
 
@@ -268,7 +272,7 @@ Causes:
 
 ```
 yarn relay         # one-shot
-yarn relay --watch # watch mode
+yarn relay --watch # watch mode (needs watchman)
 ```
 
 `__generated__/UserCard_user.graphql.ts` must contain the field in its selections. If not, the compiler didn't see your edit.
@@ -280,10 +284,10 @@ Symptoms: works locally, fails in CI with field-not-found. Cause: `__generated__
 Fix: either check in `__generated__` or run `relay-compiler` in CI before the bundler. Add a check:
 
 ```
-yarn relay && git diff --exit-code
+yarn relay --validate
 ```
 
-This fails CI if committed artifacts are out of sync.
+`--validate` writes nothing and exits with a non-zero code when a committed artifact is out of date.
 
 ### Fragment spread missing
 

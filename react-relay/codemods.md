@@ -28,7 +28,7 @@ Adds `@dangerously_unaliased_fixme` to every fragment spread that is only condit
 npx relay-compiler codemod mark-dangerous-conditional-fragment-spreads
 ```
 
-Progressive rollout is supported via a `--rollout` flag paired with the `enforce_fragment_alias_where_ambiguous` feature flag in `relay.config.json`:
+Progressive rollout is supported via the `--rollout-percentage` parameter (shorthand `-r`) paired with the `enforce_fragment_alias_where_ambiguous` feature flag in rollout mode in `relay.config.json`:
 
 ```json
 {
@@ -46,7 +46,6 @@ Strips `@required` from fields that can never be null in the generated types. Sa
 
 - Fields inside a fragment/operation carrying `@throwOnFieldError`
 - Fields under a linked field with `@catch`
-- Fields whose schema type became non-null after a server change
 
 The compiler removes a directive only when it can prove the generated TypeScript/Flow output is unchanged.
 
@@ -54,7 +53,27 @@ The compiler removes a directive only when it can prove the generated TypeScript
 npx relay-compiler codemod remove-unnecessary-required-directives
 ```
 
-Typical workflow: tighten schema nullability on the server, pull new SDL, run this codemod to clean up now-redundant `@required`.
+Typical workflow: adopt `@throwOnFieldError` or `@catch`, then run this codemod to clean up now-redundant `@required`.
+
+### `fix-all` (v21+)
+
+Runs all Relay compiler transforms and applies the fix for each fixable diagnostic. Run it after each Relay version upgrade:
+
+```bash
+npx relay-compiler codemod fix-all
+```
+
+In v21 it rewrites `@RelayResolver` docblocks to `@relayType` / `@relayField`.
+
+## Upgrading to v21
+
+- **TypeScript types ship in the packages.** `relay-runtime` and `react-relay` include `.d.ts` files (present from 21.0.1). Remove `@types/relay-runtime` and `@types/react-relay`. Named ESM imports work in `.mjs` files.
+- **Flow users:** generated types use `(expr as Type)` casts (Flow 0.250.0 or later), `ReadonlyArray`, `unknown` and `NonNullable`. Re-run the compiler to regenerate all artifacts.
+- **`@live_query` is removed.** Use `@client_polling(interval: ...)` for polling or `@live` for server-pushed updates.
+- **Resolver docblocks:** `@RelayResolver` becomes `@relayType` / `@relayField`. The verbose legacy tags (`@onType`, `@onInterface`, `@fieldName`, `@edgeTo`) are removed. Run `codemod fix-all`, or enable the `allow_legacy_relay_resolver_tag` feature flag to keep the old tag for now.
+- **`@oneOf` inputs** generate a discriminated union type that permits 1 property at a time. Set `"oneOfType": "ignore"` in the compiler config to keep the object type with all-optional fields. (The v21 release notes name the value `"relaxed"`; the compiler config schema accepts `"strict"` and `"ignore"`.)
+- **Compiler flags:** `relay-compiler --validate` exits with a non-zero code when an artifact is out of date, and writes nothing. `relay-compiler --no-watchman` (21.0.1) finds files by directory traversal; `--watch` needs watchman.
+- **Experimental React Server Components entry point:** `react-relay/rsc_EXPERIMENTAL` exports `serverFetchQuery`, `serverReadFragment`, `serverPreloadQuery` and `useQueryFromServer`. The API can change between versions.
 
 ## Upgrading from Flow to TypeScript type emission
 
@@ -118,7 +137,7 @@ Note: an experimental successor syntax (fragment arguments declared like field a
 `@required` is adopted manually, field-by-field — there is no codemod that *adds* it (the compiler cannot infer your null semantics). Typical rollout:
 
 1. Pick an action type per call site:
-   - `NONE` — null is expected; no logging.
+   - `NONE` — null is expected; the parent field becomes null, no logging.
    - `LOG` — unexpected null; component still renders, logger fires a `missing_required_field.log` event.
    - `THROW` — unrecoverable; component throws, must sit under an error boundary.
 2. Apply on leaf fields first:
@@ -128,8 +147,8 @@ Note: an experimental successor syntax (fragment arguments declared like field a
      avatar @required(action: LOG) { url @required(action: LOG) }
    }
    ```
-3. Parent `@required` must have action severity ≥ its children.
-4. When the server tightens nullability on the same field, run `remove-unnecessary-required-directives` to prune redundant annotations.
+3. A child `@required` must have action severity ≥ its `@required` parent (`NONE` < `LOG` < `THROW`).
+4. After a fragment adopts `@throwOnFieldError` or `@catch`, run `remove-unnecessary-required-directives` to prune redundant annotations.
 
 `@required` is locally scoped to the fragment — different components can handle the same field differently.
 
@@ -178,7 +197,8 @@ For GraphQL-literal rewrites, parse the template body yourself (`graphql` packag
 | Codemod | Version | Run when |
 |---|---|---|
 | `mark-dangerous-conditional-fragment-spreads` | v19+ | Upgrading to v19; before enabling `enforce_fragment_alias_where_ambiguous`. |
-| `remove-unnecessary-required-directives` | v16+ | After the server tightens field nullability, or after adopting `@throwOnFieldError` / `@catch`. |
+| `remove-unnecessary-required-directives` | v16+ | After adopting `@throwOnFieldError` / `@catch`. |
+| `fix-all` | v21+ | After each Relay version upgrade; migrates resolver docblocks to `@relayType` / `@relayField`. |
 | `relay-codemod` (archived jscodeshift) | pre-hooks | Only if still on `createFragmentContainer` / classic Relay; prefer manual rewrite. |
 | Custom jscodeshift transform | any | Project-specific renames, import rewrites, bespoke cleanups. |
 

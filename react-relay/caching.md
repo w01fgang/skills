@@ -26,7 +26,7 @@ Three questions drive everything in this document:
 
 ## 2. Fetch Policies
 
-Fetch policies are the primary knob for trading latency for freshness. They are accepted by `useLazyLoadQuery`, `loadQuery` (via `useQueryLoader`), and `refetch`.
+Fetch policies are the primary knob for trading latency for freshness. They are accepted by `useLazyLoadQuery`, `loadQuery` (via `useQueryLoader`), and `refetch`. `fetchQuery` accepts `network-only` (its default) and `store-or-network` only.
 
 ### 2.1 The Four Policies
 
@@ -218,7 +218,7 @@ When a retainer releases, the operation is held in a FIFO release buffer. If the
 import { Environment, Network, RecordSource, Store } from 'relay-runtime';
 
 const store = new Store(new RecordSource(), {
-  gcReleaseBufferSize: 10, // default 10
+  gcReleaseBufferSize: 10, // default 10; 0 turns the release buffer off
 });
 ```
 
@@ -226,7 +226,7 @@ Tune based on navigation depth: SPAs with deep back/forward flows benefit from a
 
 ### 4.5 GC Scheduler
 
-GC is triggered when records become orphaned. By default, it runs synchronously on release. Supply a custom scheduler to defer work to idle time:
+GC is triggered when records become orphaned. By default, Relay schedules it with `resolveImmediate`, so it runs right after the current task. Supply a custom scheduler to defer work to idle time:
 
 ```ts
 const store = new Store(new RecordSource(), {
@@ -565,7 +565,7 @@ Mounted readers of that record should use `useSubscribeToInvalidationState` to r
 | `store-or-network` won't refetch fresh server data | Query is present and fresh per Relay | Use `store-and-network` or set `queryCacheExpirationTime` |
 | `store-only` returns partial data and suspends forever | Required fields genuinely missing | Ensure prefetch wrote all selected fields; or switch to `store-or-network` |
 | Fragment at leaf suspends the whole screen | Missing local `<Suspense>` boundary | Wrap the partially-cached fragment in its own `<Suspense>` |
-| GC causes jank during rapid navigation | Synchronous default scheduler | Provide `gcScheduler: requestIdleCallback` |
+| GC causes jank during rapid navigation | Default scheduler (`resolveImmediate`) runs GC right after each release | Provide `gcScheduler: requestIdleCallback` |
 | Pagination resets unexpectedly | `invalidateRecord` on a connection parent | Use explicit `ConnectionHandler` edge insertion instead |
 | `useLazyLoadQuery` unretains too eagerly with StrictMode double-invoke | Mount/unmount/mount race outpaces release buffer | Prefer `useQueryLoader` + `usePreloadedQuery`; or increase `gcReleaseBufferSize` |
 | Mounted list doesn't reflect a new record written via updater | Connection not updated | Insert edge via `ConnectionHandler.insertEdgeBefore/After` in the mutation updater |

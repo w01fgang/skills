@@ -116,7 +116,7 @@ A parent may not read fields from a child's fragment without spreading it. A chi
 
 ## 3. Architecture Overview
 
-Relay is three collaborating systems:
+Relay has three core parts: the Relay Compiler, the Relay Runtime, and React/Relay (the hooks). The network layer is a component of the runtime:
 
 ```
 +-------------+      +-------------+      +-------------+
@@ -279,7 +279,7 @@ Components re-render with new fragment data
 Merge semantics:
 - New Records are added
 - Existing Records have fields merged field-by-field
-- Null fields delete the Record (for explicit server deletions)
+- Records that are null in the published source are deleted in the store (for explicit server deletions)
 
 ### 5.5 Garbage collection
 

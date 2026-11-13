@@ -269,7 +269,7 @@ function ProfileLauncher({userId}: {userId: string}) {
 ```
 
 Notes:
-- `loadEntryPoint` throws if invoked during render — fire it from an effect or event handler.
+- `loadEntryPoint` can throw if invoked during render — call it from an event handler or an effect.
 - Data is written to the store when both AST and query response are available and stays retained until disposal.
 
 ## `loadEntryPoint` imperative

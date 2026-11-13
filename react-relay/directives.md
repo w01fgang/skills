@@ -160,6 +160,9 @@ Rarely needed; prefer `@inline`.
 ...Parent_user @relay(mask: false)
 ```
 
+On a fragment definition, `@relay(mask: false)` changes the generated types so
+the fragment is usable only through unmasked spreads.
+
 **Pitfalls**
 - Breaks the encapsulation guarantee. Do not combine with `@arguments`.
 
@@ -215,7 +218,7 @@ const { data, loadNext, hasNext, isLoadingNext } = usePaginationFragment(
 
 ## Declarative mutation updates
 
-All four operate on **mutation or subscription response fields** and need a
+All four operate on **mutation, subscription or query response fields** and need a
 `connections: [ID!]!` variable populated from `__id` on the parent connection.
 
 ```graphql
@@ -410,15 +413,15 @@ fragment Friends_user on User
 
 Bubbles null up if the annotated field is null.
 
-**Signature** — `@required(action: NONE | LOG | THROW)`
+**Signature** — `@required(action: NONE | LOG | THROW | DANGEROUSLY_THROW_ON_SEMANTICALLY_NULLABLE_FIELD)`
 
 **Where** — field selection.
 
 ```graphql
 fragment UserEmail_user on User {
   email @required(action: LOG)
-  profile @required(action: THROW) {
-    bio @required(action: NONE)
+  profile @required(action: LOG) {
+    bio @required(action: THROW)
   }
 }
 ```
@@ -426,21 +429,27 @@ fragment UserEmail_user on User {
 | `action` | Behavior |
 |----------|----------|
 | `NONE`   | Parent linked field becomes null |
-| `LOG`    | Same as `NONE` plus a `requiredFieldLogger` call |
+| `LOG`    | Same as `NONE` plus a `missing_required_field.log` event to `relayFieldLogger` |
 | `THROW`  | Reading the fragment throws |
+| `DANGEROUSLY_THROW_ON_SEMANTICALLY_NULLABLE_FIELD` | Same as `THROW`, allowed on nullable fields when the `disallow_required_action_throw_on_semantically_nullable_fields` feature flag is on. A migration aid; avoid new uses. |
 
 **Pitfalls**
 - `@required` applies to the reader, not the network — the field is still
   fetched.
 - If every selection on a parent object is `@required(THROW)`, the parent is
   effectively non-null when reading.
+- A `@required` field cannot have an `action` less severe than its `@required`
+  parent (`NONE` < `LOG` < `THROW`).
+- Inside a `@connection`, `@required` on the `node` field or on its direct
+  child fields is a compiler error.
 
 ### `@throwOnFieldError`
 
 Promotes GraphQL field errors in the response to thrown exceptions at read
-time, and makes selections semantically non-null in generated types.
+time, and makes selections semantically non-null in generated types. It also
+throws when data is missing from the store.
 
-**Where** — queries, fragments, mutations, aliased inline fragments.
+**Where** — queries and fragments.
 
 ```graphql
 fragment Card_user on User @throwOnFieldError {
@@ -465,6 +474,8 @@ Catches field errors into a result wrapper instead of throwing.
 **Signature** — `@catch(to: RESULT | NULL)` (default `RESULT`).
 
 **Where** — fields, fragments, queries, mutations, aliased inline fragments.
+Relay v21 also accepts `@catch` on `@connection` fields and on client edge
+fields.
 
 ```graphql
 fragment Card_user on User @throwOnFieldError {
@@ -485,6 +496,8 @@ const { name, followerCount, latestPost } = useFragment(...);
   union.
 - `@catch` at the query root is the typical escape hatch from
   `@throwOnFieldError`.
+- `@catch` and `@throwOnFieldError` cover the fields of their own query,
+  fragment or mutation. Fields of a spread fragment need their own directive.
 
 ### `@semanticNonNull`
 
@@ -494,8 +507,8 @@ field as non-null so you don't have to null-check it at read sites, while the
 runtime still handles error cases gracefully (usually via `@throwOnFieldError`
 or `@catch` at an ancestor selection).
 
-**Signature** — `@semanticNonNull(levels: [Int!])` (levels applies for list
-types — specify which list levels are semantically non-null; default `[0]`).
+**Signature** — `@semanticNonNull(levels: [Int] = [0])` (levels applies for list
+types — specify which list levels are semantically non-null).
 
 **Where it applies** — schema definition (on field definitions), not in client
 queries.
@@ -519,10 +532,12 @@ errors surface rather than crash at runtime.
 Aliases a fragment spread or inline fragment so it reads as a nested object;
 used to make conditional / type-refined fragments null-safe.
 
-**Signature** — `@alias(as: String)` (`as` is optional; defaults to the
-fragment name).
+**Signature** — `@alias(as: String)`. `as` is optional. The default alias is
+the fragment name for a fragment spread and the type name for an inline
+fragment. An inline fragment with no type condition needs `as`.
 
-**Where** — fragment spread, inline fragment.
+**Where** — fragment spread, inline fragment. Relay v21 also accepts `@alias`
+on fragment definitions.
 
 ```graphql
 fragment Feed_viewer on Viewer {
@@ -548,18 +563,20 @@ if (data.actor.asUser != null) {
 
 ## Resolvers
 
-All resolver directives live in **docblock comments** on exported TS/JS
-functions in files the Relay compiler scans.
+Resolver tags live in **docblock comments** on exported TS/JS functions and
+types in files the Relay compiler scans. The compiler reads a docblock only
+when it has a `@relayType` or `@relayField` tag. Relay v20 and earlier used the
+single tag `@RelayResolver`; `relay-compiler codemod fix-all` migrates it.
 
-### `@RelayResolver`
+### `@relayField` and `@relayType`
 
-Defines a field or type in client state.
+`@relayField` defines a field. `@relayType` defines a client type.
 
 **Field form**
 
 ```ts
 /**
- * @RelayResolver User.fullName: String
+ * @relayField User.fullName: String
  */
 export function fullName(user: UserModel): string {
   return `${user.first} ${user.last}`;
@@ -570,7 +587,7 @@ export function fullName(user: UserModel): string {
 
 ```ts
 /**
- * @RelayResolver User
+ * @relayType User
  */
 export function User(id: DataID): UserModel {
   return UserService.getById(id);
@@ -578,19 +595,25 @@ export function User(id: DataID): UserModel {
 ```
 
 **Pitfalls**
-- The docblock's field/type name must match the schema the compiler emits.
-- Resolver source files must be listed in `relay.config`'s `include` paths.
+- The function name must match the field name or the type name in the docblock.
 
-### `@RelayResolverModel`
+### `@rootFragment`
 
-Shorthand for declaring a strong model type whose fields come from sibling
-resolver functions.
+Names the fragment that a derived field reads. The resolver receives a
+fragment key and reads it with `readFragment()` from `relay-runtime`.
 
 ```ts
 /**
- * @RelayResolverModel
+ * @relayField User.fullName: String
+ * @rootFragment UserFullNameFragment
  */
-export type TodoModel = { id: DataID; text: string; complete: boolean };
+export function fullName(key: UserFullNameFragment$key): string {
+  const user = readFragment(
+    graphql`fragment UserFullNameFragment on User { firstName lastName }`,
+    key,
+  );
+  return `${user.firstName} ${user.lastName}`;
+}
 ```
 
 ### `@weak`
@@ -600,23 +623,10 @@ groups that belong to a parent.
 
 ```ts
 /**
- * @RelayResolver ProfilePicture
+ * @relayType ProfilePicture
  * @weak
  */
 export type ProfilePicture = { url: string; height: number; width: number };
-```
-
-### `@outputType`
-
-Advertises that a resolver returns a schema type rather than a scalar — lets
-you compose client-state objects.
-
-```ts
-/**
- * @RelayResolver User.primaryAddress: Address
- * @outputType
- */
-export function primaryAddress(user: UserModel): AddressModel { ... }
 ```
 
 ### `@live`
@@ -627,7 +637,7 @@ return a `LiveState<T>`.
 ```ts
 import type { LiveState } from "relay-runtime";
 /**
- * @RelayResolver Query.counter: Int
+ * @relayField Query.counter: Int
  * @live
  */
 export function counter(): LiveState<number> {
@@ -639,22 +649,30 @@ export function counter(): LiveState<number> {
 ```
 
 **Pitfalls**
-- Call the subscriber only on real changes — spurious notifications cause
-  re-renders everywhere the field is read.
-- Batch updates with `RelayStore.batchLiveStateUpdates` when bursting.
+- Confirm that the value changed before you call the subscriber. Relay
+  supports extra notifications, and each one costs work.
+- Batch updates with `relayStore.batchLiveStateUpdates` when bursting.
 
 ### `@waterfall`
 
-Marks a resolver edge that lazily fetches server data — surfacing it in tools
-so engineers can reason about render-time round trips.
+A GraphQL directive on the selection that reads a resolver edge to a server
+type. Relay fetches the server data for that edge in a second request, and the
+compiler requires `@waterfall` on each read of such a field.
 
 ```ts
 /**
- * @RelayResolver Post.author: User
- * @waterfall
+ * @relayField Post.author: User
  */
 export function author(post: PostModel): { id: DataID } {
   return { id: post.authorId };
+}
+```
+
+```graphql
+fragment PostByline_post on Post {
+  author @waterfall {
+    name
+  }
 }
 ```
 
@@ -732,13 +750,14 @@ determines which bundle to download; `@module` names the bundle per variant.
 ```
 
 **Where** — `@match` on a field returning a union/interface;
-`@module` on an inline fragment inside that selection.
+`@module` on a fragment spread inside that selection. `@module` also works on
+a fragment spread without `@match`.
 
 ```graphql
 fragment Story_story on Story {
   hero @match {
-    ... on Image @module(name: "ImageHero.react") { url }
-    ... on Video @module(name: "VideoHero.react") { src }
+    ...ImageHero_hero @module(name: "ImageHero.react")
+    ...VideoHero_hero @module(name: "VideoHero.react")
   }
 }
 ```
@@ -764,7 +783,7 @@ import { MatchContainer } from "react-relay";
 | `@refetchable`         | fragment on Query / Viewer / Node               | Generate a refetch query |
 | `@inline`              | fragment def                                    | Read data outside React render |
 | `@relay(plural)`       | fragment def                                    | Fragment expects a list of refs |
-| `@relay(mask: false)`  | fragment spread                                 | Disable data masking |
+| `@relay(mask: false)`  | fragment spread / def                              | Disable data masking |
 | `@connection`          | connection field                                | Register a paginated connection |
 | `@appendEdge`          | mutation edge field                             | Append edge to connections |
 | `@prependEdge`         | mutation edge field                             | Prepend edge to connections |
@@ -776,16 +795,16 @@ import { MatchContainer } from "react-relay";
 | `@stream`              | list field                                      | Stream list items |
 | `@stream_connection`   | connection field                                | Stream + connection combined |
 | `@required`            | field                                           | Null handling (NONE/LOG/THROW) |
-| `@throwOnFieldError`   | query / fragment / mutation / aliased inline    | Throw on field errors; non-null types |
+| `@throwOnFieldError`   | query / fragment                                | Throw on field errors; non-null types |
 | `@catch`               | field / fragment / query / mutation             | Catch field errors into result |
 | `@semanticNonNull`     | schema field definition                         | Mark field non-null except on errors |
-| `@alias`               | fragment spread / inline fragment               | Null-safe nested access |
-| `@RelayResolver`       | docblock                                        | Define resolver field or type |
-| `@RelayResolverModel`  | docblock                                        | Declare a strong model type |
+| `@alias`               | fragment spread / inline fragment / fragment def | Null-safe nested access |
+| `@relayField`          | docblock                                        | Define resolver field |
+| `@relayType`           | docblock                                        | Define resolver type |
+| `@rootFragment`        | docblock                                        | Data a derived resolver reads |
 | `@weak`                | docblock                                        | Value-object model without id |
-| `@outputType`          | docblock                                        | Resolver returns a schema type |
 | `@live`                | docblock                                        | Live resolver (LiveState<T>) |
-| `@waterfall`           | docblock                                        | Mark lazy server fetch edge |
+| `@waterfall`           | field reading a resolver edge to a server type  | Acknowledge the second request |
 | `@preloadable`         | query def                                       | Emit $Parameters for loadQuery |
 | `@raw_response_type`   | query / mutation def                            | Type optimisticResponse |
 | `@no_inline`           | fragment def                                    | Don't inline into parents |

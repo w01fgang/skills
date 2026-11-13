@@ -17,24 +17,36 @@ Use resolvers when state is:
 
 ## Enabling
 
-Add resolver support to `relay.config.json` (the "Enabling" page in the docs returns 404 at time of writing; these flags come from the Relay compiler source and examples in adjacent pages):
+Resolvers need no compiler feature flag. Run the compiler (`relay-compiler`). It reads each docblock that has a `@relayType` or `@relayField` tag and ignores all other docblocks. It generates artifacts alongside your fragments.
 
-```json
-{
-  "src": "./src",
-  "language": "typescript",
-  "schema": "./schema.graphql",
-  "schemaExtensions": ["./src/schema-extensions"],
-  "featureFlags": {
-    "enable_relay_resolver_transform": true,
-    "enable_resolver_normalization_ast": true
-  }
-}
+Configure `relayFieldLogger` on the Environment to record errors that resolver functions throw:
+
+```ts
+const environment = new Environment({
+  network,
+  store,
+  relayFieldLogger: (event) => {
+    if (event.kind === "relay_resolver.error") {
+      console.warn(`Resolver error in ${event.owner}.${event.fieldPath}`, event.error);
+    }
+  },
+});
 ```
 
-Then run the compiler (`relay-compiler`) — it parses `@RelayResolver` docblocks and generates artifacts alongside your fragments.
+### Docblock tags (Relay v21)
 
-## Defining Fields on Server Types
+| Tag | Defines |
+| --- | --- |
+| `@relayType TypeName` | A client type. Add `@weak` for a type without an ID. |
+| `@relayField TypeName.fieldName: FieldType` | A field on a type. |
+| `@rootFragment FragmentName` | The data that a derived field reads. |
+| `@live` | A field or strong type whose value changes over time. |
+| `@deprecated reason` | A deprecated field. |
+| Free text in the docblock | The description of the type or field. |
+
+Relay v20 and earlier used the single tag `@RelayResolver` for types and fields. To migrate, run `relay-compiler codemod fix-all`. To keep the old tag during a migration, enable the `allow_legacy_relay_resolver_tag` feature flag in the compiler config.
+
+## Defining Fields
 
 A resolver is a named exported function plus a docblock. The function name **must** match the field name.
 
@@ -43,14 +55,14 @@ A resolver is a named exported function plus a docblock. The function name **mus
 import type { UserModel } from "./UserModel";
 
 /**
- * @RelayResolver User.greeting: String
+ * @relayField User.greeting: String
  */
 export function greeting(user: UserModel): string {
   return `Hello, ${user.name}!`;
 }
 ```
 
-The first argument is the model instance (for server types, Relay passes the record). Relay memoizes automatically — no `useMemo` needed.
+The first argument is the model instance that the type resolver returns. A field on a server type reads its data through `@rootFragment` (see [Derived Fields](#derived-fields)). Relay memoizes automatically — no `useMemo` needed.
 
 Consume it like any field:
 
@@ -75,7 +87,7 @@ function UserGreeting({ user }: { user: UserGreeting$key }) {
 
 A client type is backed by a JavaScript model object. Two flavors: **strong** (has an ID, memoized) and **weak** (no ID, inline).
 
-### Strong Types with @RelayResolver
+### Strong Types with @relayType
 
 Strong types have unique IDs. Define with a capitalized function matching the type name:
 
@@ -91,50 +103,26 @@ export type TodoModel = {
 };
 
 /**
- * @RelayResolver Todo
+ * @relayType Todo
  */
 export function Todo(id: DataID): TodoModel {
   return TodoService.getById(id);
 }
 
 /**
- * @RelayResolver Todo.text: String
+ * @relayField Todo.text: String
  */
 export function text(todo: TodoModel): string {
   return todo.text;
 }
 
 /**
- * @RelayResolver Todo.completed: Boolean
+ * @relayField Todo.completed: Boolean
  */
 export function completed(todo: TodoModel): boolean {
   return todo.completed;
 }
 ```
-
-### @RelayResolverModel Shorthand
-
-`@RelayResolverModel` generates the model resolver from a class or object type automatically — use it when your model already has the right shape:
-
-```tsx
-/**
- * @RelayResolver
- * @RelayResolverModel
- */
-export class Todo {
-  id: DataID;
-  text: string;
-  completed: boolean;
-
-  constructor(id: DataID, text: string) {
-    this.id = id;
-    this.text = text;
-    this.completed = false;
-  }
-}
-```
-
-Fields on `Todo` can then be defined as methods or separate resolvers.
 
 ### Weak Types
 
@@ -142,7 +130,7 @@ Weak types have no independent identity — they're bags of fields owned by a pa
 
 ```tsx
 /**
- * @RelayResolver ProfilePicture
+ * @relayType ProfilePicture
  * @weak
  */
 export type ProfilePicture = {
@@ -152,7 +140,7 @@ export type ProfilePicture = {
 };
 
 /**
- * @RelayResolver User.profilePicture: ProfilePicture
+ * @relayField User.profilePicture: ProfilePicture
  */
 export function profilePicture(user: UserModel): ProfilePicture {
   return {
@@ -169,7 +157,7 @@ Resolver types can implement schema interfaces or participate in unions:
 
 ```tsx
 /**
- * @RelayResolver BasicUser implements IUser
+ * @relayType BasicUser implements IUser
  */
 export function BasicUser(id: DataID): BasicUserModel {
   return { ...BasicUserService.getById(id), name: "Basic" };
@@ -180,7 +168,7 @@ Include `__typename` when returning union members:
 
 ```tsx
 /**
- * @RelayResolver User.pet: Animal
+ * @relayField User.pet: Animal
  */
 export function pet(
   user: UserModel,
@@ -195,7 +183,7 @@ Declare arguments in the docblock; they arrive as the second function argument.
 
 ```tsx
 /**
- * @RelayResolver User.greet(salutation: String!): String
+ * @relayField User.greet(salutation: String!): String
  */
 export function greet(
   user: UserModel,
@@ -219,7 +207,7 @@ When a derived resolver reads a field that takes arguments, thread them through 
 
 ```tsx
 /**
- * @RelayResolver User.fancyGreeting: String
+ * @relayField User.fancyGreeting: String
  * @rootFragment UserFancyGreetingFragment
  */
 export function fancyGreeting(
@@ -248,7 +236,7 @@ import { readFragment, graphql } from "relay-runtime";
 import type { UserFullNameFragment$key } from "./__generated__/UserFullNameFragment.graphql";
 
 /**
- * @RelayResolver User.fullName: String
+ * @relayField User.fullName: String
  * @rootFragment UserFullNameFragment
  */
 export function fullName(key: UserFullNameFragment$key): string {
@@ -269,7 +257,7 @@ Derived resolvers compose — they can read other resolvers:
 
 ```tsx
 /**
- * @RelayResolver CheckoutItem.isValid: Boolean
+ * @relayField CheckoutItem.isValid: Boolean
  * @rootFragment CheckoutItemFragment
  */
 export function isValid(key: CheckoutItemFragment$key): boolean {
@@ -288,7 +276,7 @@ export function isValid(key: CheckoutItemFragment$key): boolean {
 }
 
 /**
- * @RelayResolver ShoppingCart.canCheckout: Boolean
+ * @relayField ShoppingCart.canCheckout: Boolean
  * @rootFragment ShoppingCartFragment
  */
 export function canCheckout(key: ShoppingCartFragment$key): boolean {
@@ -311,7 +299,7 @@ export function canCheckout(key: ShoppingCartFragment$key): boolean {
 ### Scalars
 
 ```tsx
-/** @RelayResolver Post.isValid: Boolean */
+/** @relayField Post.isValid: Boolean */
 export function isValid(post: PostModel): boolean {
   return post.content !== "" && post.author != null;
 }
@@ -322,7 +310,7 @@ export function isValid(post: PostModel): boolean {
 Any supported return type can be wrapped in a list (except raw server types):
 
 ```tsx
-/** @RelayResolver User.favoriteColors: [String] */
+/** @relayField User.favoriteColors: [String] */
 export function favoriteColors(user: UserModel): string[] {
   return user.favoriteColors;
 }
@@ -333,7 +321,7 @@ export function favoriteColors(user: UserModel): string[] {
 Return `{ id: DataID }` — Relay invokes the type's model resolver to hydrate fields:
 
 ```tsx
-/** @RelayResolver Post.author: User */
+/** @relayField Post.author: User */
 export function author(post: PostModel): { id: DataID } {
   return { id: post.authorId };
 }
@@ -344,7 +332,7 @@ export function author(post: PostModel): { id: DataID } {
 Return the full object:
 
 ```tsx
-/** @RelayResolver Post.cover: CoverImage */
+/** @relayField Post.cover: CoverImage */
 export function cover(post: PostModel): CoverImage {
   return { url: post.coverUrl, alt: post.coverAlt };
 }
@@ -355,7 +343,7 @@ export function cover(post: PostModel): CoverImage {
 A resolver can point into the server graph by returning a `DataID`. Consumers must annotate the selection with `@waterfall` to acknowledge the extra round trip:
 
 ```tsx
-/** @RelayResolver Post.author: ServerUser */
+/** @relayField Post.author: ServerUser */
 export function author(post: PostModel): DataID {
   return post.authorId;
 }
@@ -377,7 +365,7 @@ query PostAuthorQuery($id: ID!) {
 For arbitrary JS values that shouldn't be in the GraphQL schema (Dates, class instances), use `RelayResolverValue`. Keep the value immutable:
 
 ```tsx
-/** @RelayResolver Post.publishDate: RelayResolverValue */
+/** @relayField Post.publishDate: RelayResolverValue */
 export function publishDate(post: PostModel): Date {
   return new Date(post.publishTimestamp);
 }
@@ -419,7 +407,7 @@ function selectorAsLiveState<T>(selector: Selector<T>): LiveState<T> {
 }
 
 /**
- * @RelayResolver Query.counter: Int
+ * @relayField Query.counter: Int
  * @live
  */
 export function counter(): LiveState<number> {
@@ -452,7 +440,7 @@ When one action mutates many slices, wrap dispatch so Relay coalesces recomputat
 ```tsx
 const originalDispatch = store.dispatch;
 store.dispatch = (action) => {
-  relayEnvironment.getStore().batchLiveStateUpdates(() => {
+  relayStore.batchLiveStateUpdates(() => {
     originalDispatch(action);
   });
 };
@@ -466,7 +454,7 @@ A live resolver can suspend by returning the suspense sentinel from `read`. All 
 import { suspenseSentinel, type LiveState } from "relay-runtime";
 
 /**
- * @RelayResolver Query.myIp: String
+ * @relayField Query.myIp: String
  * @live
  */
 export function myIp(): LiveState<string> {
@@ -531,7 +519,7 @@ When a field is *logically* required but must still be nullable for the error mo
 
 ```tsx
 /**
- * @RelayResolver User.email: String @semanticNonNull
+ * @relayField User.email: String @semanticNonNull
  */
 export function email(user: UserModel): string {
   return user.email ?? "unknown@example.com";
@@ -544,7 +532,7 @@ For predictable fallbacks, return a default value instead of throwing:
 
 ```tsx
 /**
- * @RelayResolver User.avatarUrl: String
+ * @relayField User.avatarUrl: String
  */
 export function avatarUrl(user: UserModel): string {
   try {
@@ -559,11 +547,11 @@ export function avatarUrl(user: UserModel): string {
 
 - **No `info` argument** — standard GraphQL resolvers receive a context/info object; Relay Resolvers do not.
 - **Schema constructs** — input types, enums, and interfaces cannot be defined *by* resolvers (though resolver types can implement schema interfaces).
-- **No mutations** — reactive mutation semantics are still being designed. Mutate underlying stores directly; live resolvers propagate the change.
+- **No mutations** — resolvers support the read path only. Mutate underlying stores directly; live resolvers propagate the change.
 - **Lazy per-fragment evaluation** — resolvers run on read, not eagerly. If the implementation requires async work (e.g., a fetch inside `read`), you'll need a live resolver + suspense sentinel; there's no built-in async resolver.
-- **Non-null return types forbidden** — every resolver field is nullable in the generated schema to accommodate thrown errors. Use `@semanticNonNull` for logically-required fields.
-- **Docblock verbosity** — type information is duplicated between the docblock GraphQL signature and the TypeScript function. Grats-inspired inference is on the roadmap.
-- **No resolver context** — there's no per-request context object; resolvers close over module-scope singletons (stores, services).
+- **Nullable return types by default** — the compiler rejects a non-nullable resolver field, because a resolver that throws makes the field null. Use `@semanticNonNull` for logically-required fields.
+- **Docblock verbosity** — type information is duplicated between the docblock GraphQL signature and the TypeScript function.
+- **Context is store-wide** — pass `resolverContext` to the `Store` constructor: `new Store(source, { resolverContext: { store: customStore } })`. Each resolver receives that value as its last argument. Set `resolverContextType` in the compiler config to type-check it.
 - **Waterfalls through `@waterfall`** — edges into server types trigger extra round trips; the directive makes this explicit but doesn't eliminate the cost.
 
 ## Decision Table

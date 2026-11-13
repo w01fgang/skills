@@ -57,7 +57,7 @@ function fetchFn(request, variables, cacheConfig, uploadables) { ... }
 |-----|------|-----------|
 | `request` | `RequestParameters` | Operation metadata. Use `request.text` (query string) or `request.id` (persisted id). Also has `request.name` and `request.operationKind` (`'query' \| 'mutation' \| 'subscription'`). |
 | `variables` | `Variables` | Plain object of variables for this operation. |
-| `cacheConfig` | `CacheConfig` | `{ force?: boolean, poll?: number, metadata?: object, transactionId?: string }`. `force: true` means the caller explicitly asked for a network round-trip (e.g. `fetchPolicy: 'network-only'`). |
+| `cacheConfig` | `CacheConfig` | `{ force?: boolean, poll?: number, liveConfigId?: string, metadata?: object, transactionId?: string }`. `force: true` means: issue the request regardless of the state of a configured response cache. `useLazyLoadQuery`, `loadQuery` and `fetchQuery` default `networkCacheConfig` to `{ force: true }`. |
 | `uploadables` | `UploadableMap \| null` | `{ [key: string]: File \| Blob }` when a mutation was issued with uploadables. Null otherwise. |
 
 ### Minimal fetchFn
@@ -440,8 +440,8 @@ async function flush() {
 }
 
 function fetchFn(request, variables, cacheConfig, uploadables) {
-  // Never batch uploads or forced requests
-  if (uploadables || cacheConfig.force) {
+  // Never batch uploads
+  if (uploadables) {
     return fetchSingle(request, variables, uploadables);
   }
   return enqueue({ query: request.text, id: request.id, variables });

@@ -64,7 +64,7 @@ export const environment = new Environment({
 | `isServer` | `boolean` | Disables client-only optimizations; set `true` during SSR. |
 | `treatMissingFieldsAsNull` | `boolean` | If `true`, reads return `null` for missing fields instead of suspending / erroring. |
 | `log` | `(event: LogEvent) => void` | Receives lifecycle events: `queryresource.fetch`, `network.start/next/complete/error`, `execute.start/next/error/complete`, `store.publish`, `store.gc`, etc. Use for metrics. |
-| `requiredFieldLogger` | `(event) => void` | Receives `@required` violations without throwing. |
+| `relayFieldLogger` | `(event) => void` | Receives field events: `missing_required_field.log` / `.throw`, `missing_expected_data.log` / `.throw`, `relay_resolver.error`, `relay_field_payload.error`. |
 | `scheduler` | `TaskScheduler` | Custom scheduler for batching store notifications (e.g. `unstable_batchedUpdates`). |
 | `getDataID` | `(fieldValue, typeName) => string` | Override Relay's default identity (default reads `id`). Useful for composite keys. |
 | `UNSTABLE_defaultRenderPolicy` | `'partial' \| 'full'` | Toggles whether partial store data satisfies a read. |
@@ -99,7 +99,7 @@ const source = new RecordSource();      // in-memory normalized record map
 const store = new Store(source, {
   gcScheduler: (run) => setTimeout(run, 0),
   gcReleaseBufferSize: 10,               // retain N most-recent released ops
-  queryCacheExpirationTime: 5 * 60_1000, // ms before cached ops are invalidated
+  queryCacheExpirationTime: 5 * 60_000, // ms before cached ops are invalidated
 });
 ```
 

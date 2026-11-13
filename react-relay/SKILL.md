@@ -1,6 +1,6 @@
 ---
 name: react-relay
-description: Use when working with Relay in a React app — writing fragments, queries, mutations, pagination, subscriptions, resolvers; debugging compiler/runtime errors; configuring caching, fetch policies, or network layer; testing Relay components. Triggers on any `useFragment`, `usePreloadedQuery`, `useMutation`, `usePaginationFragment`, `useRefetchableFragment`, `useSubscription`, `useQueryLoader`, `useEntryPointLoader`, `commitLocalUpdate`, `ConnectionHandler`, `@connection`, `@refetchable`, `@argumentDefinitions`, `@appendEdge`, `@RelayResolver`, `@required`, `@defer`, `@stream`, RelayEnvironmentProvider, relay-compiler error, `__generated__`, "inconsistent typename", "why is my field null".
+description: Use when working with Relay in a React app — writing fragments, queries, mutations, pagination, subscriptions, resolvers; debugging compiler/runtime errors; configuring caching, fetch policies, or network layer; testing Relay components. Triggers on any `useFragment`, `usePreloadedQuery`, `useMutation`, `usePaginationFragment`, `useRefetchableFragment`, `useSubscription`, `useQueryLoader`, `useEntryPointLoader`, `commitLocalUpdate`, `ConnectionHandler`, `@connection`, `@refetchable`, `@argumentDefinitions`, `@appendEdge`, `@relayField`, `@relayType`, `@RelayResolver`, `@required`, `@catch`, `@throwOnFieldError`, `@alias`, `@defer`, `@stream`, RelayEnvironmentProvider, relay-compiler error, `__generated__`, "inconsistent typename", "why is my field null".
 ---
 
 # React Relay
@@ -10,8 +10,8 @@ description: Use when working with Relay in a React app — writing fragments, q
 - **Fragments are the unit.** Each component declares its own data needs via a fragment. Parent queries compose children by spreading fragments.
 - **Data masking.** A component can only read fields in its own fragment — never a parent's or child's. Pass the fragment ref (`$key`) down, not the data.
 - **Compiler-first.** Every `graphql\`...\`` template is compiled ahead of time. Re-run `relay-compiler` after every GraphQL edit. Commit `__generated__/` to source control.
-- **Normalized store.** Records are keyed by `id`. Mutating a record re-renders every subscriber across the app. Always include `id` in fragments.
-- **Render-as-you-fetch.** Start the network request in an event handler / route loader, pass a query reference down, suspend on read. Never fetch during render for critical data.
+- **Normalized store.** Records are keyed by `id`. Mutating a record re-renders every subscriber across the app. The compiler adds the `id` selection for you.
+- **Render-as-you-fetch.** Start the network request in an event handler / route loader, pass a query reference down, suspend on read. Prefer this over a fetch during render.
 
 ## Navigation — which file to read
 
@@ -22,7 +22,7 @@ description: Use when working with Relay in a React app — writing fragments, q
 | Mutations, connections, optimistic UI | [updating-data.md](./updating-data.md) | Writing mutations or modifying the store |
 | Fetch policies, GC, staleness | [caching.md](./caching.md) | Choosing fetch policy or debugging cache behavior |
 | Custom fetch, auth, subs transport, persisted queries | [network.md](./network.md) | Configuring Network layer or server integration |
-| Client-side derived state, live fields | [resolvers.md](./resolvers.md) | Using `@RelayResolver` |
+| Client-side derived state, live fields | [resolvers.md](./resolvers.md) | Using `@relayField` / `@relayType` |
 | EntryPoint APIs, code-split routing | [entrypoints.md](./entrypoints.md) | Route-level preloading |
 | Imperative APIs (outside React) | [runtime.md](./runtime.md) | `fetchQuery`, `commitMutation`, `Store`, `Environment` |
 | Testing components, mocking payloads | [testing.md](./testing.md) | Writing Jest/RTL tests |
@@ -109,8 +109,9 @@ refetch({ sort: 'OLDEST' }, { fetchPolicy: 'network-only' });
 |---|---|
 | Render component with data | `useFragment` |
 | Fetch at route entry | `useQueryLoader` + `usePreloadedQuery` |
-| Fetch inside a leaf component | `useLazyLoadQuery` (only at route level; never nest) |
+| Fetch a query during render | `useLazyLoadQuery` (the docs prefer `useQueryLoader` + `usePreloadedQuery`; nested lazy queries can waterfall) |
 | Paginate a connection | `usePaginationFragment` |
+| Paginate with a prefetched buffer (experimental) | `usePrefetchableForwardPaginationFragment` |
 | Change variables on the same component | `useRefetchableFragment` |
 | Send a mutation | `useMutation` |
 | Real-time updates | `useSubscription` |
@@ -124,11 +125,11 @@ refetch({ sort: 'OLDEST' }, { fetchPolicy: 'network-only' });
 
 | Mistake | Fix |
 |---|---|
-| Forgot to re-run compiler | `relay-compiler --watch` during dev |
+| Forgot to re-run compiler | `relay-compiler --watch` during dev (needs watchman); `relay-compiler --validate` in CI |
 | Reading a field not in fragment | Add it — masking hides undeclared fields |
 | `loadQuery` during render | Move to effect / event handler / router loader |
 | Missing Suspense boundary | Any data hook can suspend — wrap it |
-| Non-unique `@connection` key | Convention: `ComponentName_typeName_fieldName` |
+| Non-unique `@connection` key | Convention: `<fragment_name>_<field_name>`, e.g. `FriendsList_user_friends` |
 | Adding item to list without `@appendEdge` or updater | Relay can't guess — use a declarative directive or manual updater |
 | Using fragment ref as data | `useFragment` returns data; the ref is opaque |
 | Nested `useLazyLoadQuery` | Causes waterfalls — lift to route level, use fragments below |
@@ -136,7 +137,7 @@ refetch({ sort: 'OLDEST' }, { fetchPolicy: 'network-only' });
 ## Golden Rules
 
 1. **One fragment per component that reads data.** Compose via fragment spreads.
-2. **Always include `id` in fragments on Node types.** Enables normalization and mutation merging.
+2. **Types need a globally unique `id`.** The compiler adds the `id` selection to each type that has one. This enables normalization and mutation merging.
 3. **Return modified records from mutations by `id`.** Relay auto-merges them into the store.
 4. **For list changes, use `@appendEdge`/`@deleteEdge`.** Fall back to manual `updater` only when declarative can't express it.
 5. **Wrap data-reading components in `<Suspense>` + error boundary.** Every hook that reads can suspend or throw.
