@@ -55,76 +55,82 @@ The resolver examples in [resolvers.md](./resolvers.md) and [directives.md](./di
 
 ## Everyday Quick Reference
 
+Each example is a trimmed copy from the Relay v21.0.1 docs (`api-reference/hooks/`). The docs write the examples in Flow. [hooks.md](./hooks.md) has the full examples.
+
 ### Read data in a component
 
-```tsx
-import { graphql, useFragment } from 'react-relay';
-import type { UserCard_user$key } from './__generated__/UserCard_user.graphql';
-
-function UserCard({ user }: { user: UserCard_user$key }) {
+```js
+function UserComponent(props: Props) {
   const data = useFragment(
-    graphql`fragment UserCard_user on User { id name avatarUrl }`,
-    user,
+    graphql`
+      fragment UserComponent_user on User {
+        name
+        profile_picture(scale: 2) {
+          uri
+        }
+      }
+    `,
+    props.user,
   );
-  return <div>{data.name}</div>;
+
+  return (
+    <>
+      <h1>{data.name}</h1>
+    </>
+  );
 }
 ```
 
-### Load a query at route level
+### Load a query from an event handler
 
-```tsx
-const [queryRef, loadQuery] = useQueryLoader(HomeQuery);
-useEffect(() => { loadQuery({ id: '4' }); }, []);
-// below: <Suspense><Home queryRef={queryRef} /></Suspense>
+```js
+const AppQuery = graphql`
+  query AppQuery($id: ID!) {
+    user(id: $id) {
+      name
+    }
+  }
+`;
 
-function Home({ queryRef }) {
-  const data = usePreloadedQuery(HomeQuery, queryRef);
-  return <UserCard user={data.user} />;
+function QueryFetcherExample() {
+  const [
+    queryReference,
+    loadQuery,
+    disposeQuery,
+  ] = useQueryLoader(
+    AppQuery,
+  );
+}
+
+function NameDisplay({ queryReference }) {
+  const data = usePreloadedQuery(AppQuery, queryReference);
+
+  return <h1>{data.user?.name}</h1>;
 }
 ```
-
-### Paginate
-
-```tsx
-const { data, loadNext, hasNext, isLoadingNext } = usePaginationFragment(fragment, ref);
-<button onClick={() => loadNext(20)} disabled={!hasNext || isLoadingNext}>Load more</button>
-```
-Fragment must use `@refetchable(queryName: "...")` + `@connection(key: "unique")`.
+Render `NameDisplay` inside `<React.Suspense>` when `queryReference` is not null.
 
 ### Mutate
 
-```tsx
-const [commit, isInFlight] = useMutation<LikeMutation>(graphql`
-  mutation LikeMutation($id: ID!) {
-    likePost(id: $id) { post { id likeCount viewerHasLiked } }
-  }
-`);
-commit({
-  variables: { id: post.id },
-  optimisticResponse: {
-    likePost: {
-      post: { id: post.id, likeCount: post.likeCount + 1, viewerHasLiked: true },
-    },
-  },
-});
+```js
+  const [commit, isInFlight] = useMutation<FeedbackLikeMutation>(graphql`
+    mutation FeedbackLikeMutation($input: FeedbackLikeData!) {
+      feedback_like(data: $input) {
+        feedback {
+          id
+          viewer_does_like
+          like_count
+        }
+      }
+    }
+  `);
 ```
 Add item to a list → use `@appendEdge(connections: $connections)` on the mutation payload.
 
-### Refetch with new variables
+### Paginate and refetch
 
-```tsx
-const [data, refetch] = useRefetchableFragment(
-  graphql`
-    fragment Comments_story on Story
-    @refetchable(queryName: "CommentsRefetchQuery")
-    @argumentDefinitions(sort: { type: "Sort", defaultValue: NEWEST }) {
-      comments(sort: $sort) { edges { node { body } } }
-    }
-  `,
-  storyRef,
-);
-refetch({ sort: 'OLDEST' }, { fetchPolicy: 'network-only' });
-```
+- Paginate: `usePaginationFragment`. The fragment needs `@refetchable(queryName: "...")` and `@connection(key: "...")`. Example: [hooks.md](./hooks.md).
+- Refetch with new variables: `useRefetchableFragment`. Example: [hooks.md](./hooks.md).
 
 ## Decision Shortcuts
 
@@ -168,7 +174,7 @@ refetch({ sort: 'OLDEST' }, { fetchPolicy: 'network-only' });
 
 ## When Something Breaks
 
-1. Compiler error? → [debugging.md](./debugging.md) § Compiler errors
+1. Compiler error? → [debugging.md](./debugging.md) § Common compiler errors, § Stale generated artifacts
 2. `Inconsistent __typename` warning? → [debugging.md](./debugging.md) § Typename
 3. Field unexpectedly null? → [debugging.md](./debugging.md) § Why is my field null?
 4. Mutation ran but UI didn't update? → [debugging.md](./debugging.md) + [updating-data.md](./updating-data.md) § Connections
