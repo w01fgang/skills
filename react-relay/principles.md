@@ -1,45 +1,48 @@
 # Principles & Architecture
 
-Relay is a GraphQL client designed around a compile-time optimizer, a normalized runtime store, and a fragment-centric data model. This document consolidates the conceptual foundations from relay.dev into a hooks-era reference.
+This document consolidates the `principles-and-architecture` pages of relay.dev.
 
 ## 1. Thinking in GraphQL
 
-GraphQL solves structural problems that REST cannot address cleanly once view hierarchies grow.
+### 1.1 Fetching data
 
-### 1.1 REST failure modes
+A REST client that fetches a list of stories and the details of each story needs _n+1_ requests to the server: 1 to fetch the list, and _n_ to fetch each item.
 
-| Problem | REST behavior | GraphQL behavior |
-| --- | --- | --- |
-| Round trips | List endpoint + N detail endpoints | Single query fetches entire tree |
-| Over-fetching | Endpoint returns fixed payload | Client selects exact fields |
-| Under-fetching | Client needs supplemental calls | Nested selection in one document |
-| Cache staleness | URI-keyed cache with duplicated entities | Normalized cache keyed by entity id |
-| Mutations | Re-fetch or guess changed data | Mutation selection set returns updated fields |
-
-### 1.2 Waterfalls vs coalesced fetching
-
-A naive client fetches a list, then fires one request per item to populate details. Each dependent request is a network round trip; tail latency compounds.
-
-```
-REST:  [list] --> [item1] --> [item2] --> [item3] --> render
-GQL:   [one query: list { id, title, item { details } }] --> render
+```javascript
+// Fetch the list of story IDs but not their details:
+rest.get('/stories').then(stories =>
+  // This resolves to a list of items with linked resources:
+  // `[ { href: "http://.../story/1" }, ... ]`
+  Promise.all(stories.map(story =>
+    rest.get(story.href) // Follow the links
+  ))
+).then(stories => {
+  // This resolves to a list of story items:
+  // `[ { id: "...", text: "..." } ]`
+  console.log(stories);
+});
 ```
 
-GraphQL lets clients describe the entire view's data needs as a tree. The server resolves it in one pass and returns a response shaped exactly like the query.
+GraphQL fetches the same data in a single network request, without a custom endpoint:
 
-### 1.3 Tree-shaken responses
+```javascript
+graphql.get(`query { stories { id, text } }`).then(
+  stories => {
+    // A list of story items:
+    // `[ { id: "...", text: "..." } ]`
+    console.log(stories);
+  }
+);
+```
 
-Because the client specifies fields, the response carries no unused bytes. Adding a new field to a component is a client-only change (given the schema already exposes it). Removing a field from a component automatically stops fetching it, because Relay's compiler re-derives the query from the fragments actually spread.
+- All data is fetched in a single round trip.
+- The client and server are decoupled: the client specifies the data needed.
 
-### 1.4 Co-located data requirements
+### 1.2 Declarative data fetching
 
-Each component owns the GraphQL fragment that describes what it needs to render. The requirements travel with the component in source: when a component moves, deletes, or changes, its data requirements move with it. The compiler stitches fragments into a single operation at build time.
+Relay is a framework for declarative data-fetching. It separates what data to fetch from how the data is fetched.
 
-### 1.5 Declarative data fetching
-
-Developers describe what data is needed, not how or when to fetch it. The framework decides the network, cache, and consistency mechanics.
-
-### 1.6 Response caches and consistency
+### 1.3 Response caches and consistency
 
 Source: v21 docs `principles-and-architecture/thinking-in-graphql` (same text in v20.1.0).
 
@@ -52,82 +55,80 @@ Source: v21 docs `principles-and-architecture/thinking-in-graphql` (same text in
 
 ## 2. Thinking in Relay
 
-Relay takes GraphQL's structural advantages and enforces them with a component contract.
-
 ### 2.1 Fragments as the primary unit
 
-A fragment is a named selection on a type. It is the atom of composition in Relay.
+Fragments are named snippets of GraphQL that specify which fields to select from an object of a particular type. A component declares its data requirements with a fragment. Fragments nest within other fragments, and ultimately within queries.
 
-```graphql
-fragment UserCard_user on User {
-  id
-  name
-  avatarUrl
-}
+```javascript
+// AuthorDetails.react.js
+const authorDetailsFragment = graphql`
+  fragment AuthorDetails_author on Author {
+    name
+    photo {
+      url
+    }
+  }
+`;
 ```
 
-Components declare fragments; parents compose them by spreading child fragments into their own. The root query is just the outermost fragment wrapped in an operation.
+A fragment reference is the second parameter of `useFragment`. A component gets a fragment reference by spreading its fragment into another fragment or a query. Fragments cannot be fetched directly: every fragment must be spread, directly or transitively, into a query.
 
 ### 2.2 Data masking
 
-A component may only read fields it explicitly selects in its own fragment. If a parent fetches `email` but the child did not declare `email` in its fragment, the child cannot read it — Relay hides it.
+Relay only allows components to access data they specifically ask for in GraphQL fragments. If one component queries for the `title` of a Story and another for its `text`, each sees only the field it asked for. Components cannot see the data requested by their children.
 
 Consequences:
-- Components cannot form hidden dependencies on sibling or parent data
-- Refactoring one component's fragment cannot silently break another
-- Removing a component cleanly removes its fields from the generated query
+- Components cannot form implicit dependencies on data that another component fetches
+- Removing the data-fetching logic of one component cannot break another component
 
-Fragment references enforce the contract. A fragment cannot be fetched on its own. A component gets a fragment reference by spreading its fragment into a parent fragment or a query, and every fragment ends up spread into a query. Relay checks the reference: when `<Story>` renders `<AuthorDetails>` without spreading its fragment, Relay warns, even when another component fetched the same fields. The code works today and breaks when that other component changes. All fields are nullable by default, so `data.story.author` can be `null`.
+Fragment references enforce the contract. Relay checks the reference: when `<Story>` renders `<AuthorDetails>` without spreading its fragment, Relay warns, even when another component fetched the same fields. The code works today and breaks when that other component changes. All fields are nullable by default, so `data.story.author` can be `null`.
 
 ### 2.3 Render-as-you-fetch (hooks)
 
-The hooks API has these request hooks:
-
 | Hook | Purpose |
 | --- | --- |
-| `useFragment` | Read a fragment's data for a component; subscribe to changes |
-| `usePreloadedQuery` | Read a query whose fetch was started earlier (outside render) |
-| `useLazyLoadQuery` | Fetch on first render; the docs prefer `usePreloadedQuery` |
-| `useQueryLoader` | Start a fetch imperatively (e.g. on route transition) |
+| `useFragment` | Read a fragment's data for a component |
+| `usePreloadedQuery` | Read a query whose fetch an earlier `loadQuery` call or `useQueryLoader` started |
+| `useLazyLoadQuery` | Fetch a query during render; the docs prefer `usePreloadedQuery` |
+| `useQueryLoader` | Load and retain queries; keeps a query reference in state |
 
-The canonical pattern is render-as-you-fetch: kick off the query before rendering (route change, link hover, event handler) with `loadQuery`, then render a component that calls `usePreloadedQuery`. Data and code stream in parallel rather than sequentially.
+`usePreloadedQuery` implements the "render-as-you-fetch" pattern:
 
-```
-loadQuery() -------\
-                    \
-route change ------> render ---> usePreloadedQuery (suspends on pending data)
-                    /
-code split ---------/
-```
-
-This avoids the classic React fetch-on-render waterfall.
+- Call the `loadQuery` callback returned from `useQueryLoader`. This stores a query reference in React state.
+- In the render method, consume the query reference with `usePreloadedQuery()`. The call suspends if the query is pending, throws an error if the query failed, and otherwise returns the query results.
+- The docs encourage this pattern over `useLazyLoadQuery()`: it fetches data earlier and does not block rendering.
 
 ### 2.4 Mutations as data changes
 
-A mutation is a GraphQL operation whose selection set describes which fields may change. The server returns the new values; Relay merges them into the store; every component subscribed to those records re-renders.
+A mutation queries for the data that may have changed. When the response includes an object with an `id` field and the store holds a record with a matching `id`, Relay merges the fields of the response into the existing record. Components that use a changed value re-render.
 
-- Optimistic updaters let the UI reflect the change immediately
-- Updater functions let the client describe store mutations the server response cannot express (inserting into a connection, removing an item)
-- Declarative directives (`@appendEdge`, `@prependEdge`, `@deleteRecord`) cover the common cases without hand-written updaters
+- Optimistic updates reflect the change in the UI before the server responds
+- The `updater` function of `UseMutationConfig` gives full control over how to update the store
+- Declarative directives (`@appendEdge`, `@prependEdge`, `@deleteRecord`) cover common cases without a hand-written updater
 
 ### 2.5 Pagination via connections
 
-Relay standardizes paginated lists through the Connection specification.
+A fragment that queries for a connection marks the field with the `@connection` directive and a static unique `key`:
 
-```graphql
-friends(first: $count, after: $cursor) @connection(key: "User_friends") {
-  edges { node { id name } }
-  pageInfo { endCursor hasNextPage }
-}
+```javascript
+const userFragment = graphql`
+  fragment UserFragment on User {
+    name
+    friends(after: $cursor, first: $count)
+      @connection(key: "UserFragment_friends") {
+      edges {
+        node {
+          ...FriendComponent
+        }
+      }
+    }
+  }
+`;
 ```
 
-`usePaginationFragment` derives a `loadNext` / `loadPrevious` function from the `@connection` directive. The store merges new edges into the existing connection record, so the UI reads the full list from one place.
+The docs recommend the key naming convention `<fragment_name>_<field_name>`. `usePaginationFragment` renders the fragment and returns `loadNext` to fetch more items in the connection.
 
-### 2.6 Component encapsulation
-
-A parent may not read fields from a child's fragment without spreading it. A child may not read fields outside its own fragment. This symmetry keeps data ownership local and refactor-safe.
-
-### 2.7 One request for a view hierarchy
+### 2.6 One request for a view hierarchy
 
 Source: v21 docs `principles-and-architecture/thinking-in-relay` (same text in v20.1.0).
 
@@ -140,35 +141,9 @@ Relay lets each component declare its data and merges the declarations into one 
 
 ## 3. Architecture Overview
 
-Relay has three core parts: the Relay Compiler, the Relay Runtime, and React/Relay (the hooks). The network layer is a component of the runtime. The data flow:
-
-```
-+-------------+      +-------------+      +-------------+
-|  Compiler   | ---> |   Runtime   | <--> |   Network   |
-| (build-time)|      | (in-app)    |      | (transport) |
-+-------------+      +-------------+      +-------------+
-       |                    |
-  reads *.{ts,tsx}     Store + RecordSource
-  writes __generated__  Environment + Observables
-```
-
-### 3.1 Build pipeline
-
-1. Compiler scans source files for `graphql\`...\`` literals
-2. Parses each literal against the schema into an IR
-3. Applies transforms (normalization, flattening, deduplication)
-4. Emits artifacts per operation and per fragment into `__generated__`
-5. Generates TypeScript/Flow types for each fragment and operation
-
-At runtime, the tagged `graphql` template is a no-op marker; the real payload is the generated artifact imported by the hooks.
-
-### 3.2 Store model
-
-The store is a normalized graph of Records. A Record is `{ id, __typename, ...fields }`. References between records are stored by id, not by inlined objects. Reading a fragment walks the graph starting from a root id, following links.
-
-### 3.3 Module roles and loose coupling
-
 Source: v21 docs `principles-and-architecture/architecture-overview` (same text in v20.1.0).
+
+Relay has three core parts: the Relay Compiler, the Relay Runtime, and React/Relay.
 
 - The compiler is a GraphQL-to-GraphQL optimizing compiler. It transforms and optimizes queries and generates build artifacts. Custom directives are translated into standard, spec-compliant GraphQL at compile time, which makes experiments with new GraphQL features easy.
 - The runtime is a high-performance GraphQL runtime for building higher-level client APIs. It provides a normalized object cache, optimized read and write operations, a generic hook for incremental field data (used by pagination), garbage collection of unreferenced entries, optimistic mutations with arbitrary logic, and primitives for subscriptions, live queries, and persisted caches.
@@ -177,174 +152,149 @@ Source: v21 docs `principles-and-architecture/architecture-overview` (same text 
 
 ## 4. Compiler Architecture
 
-The compiler is the optimizer that makes runtime cheap.
-
-### 4.1 Phases
-
-```
-source files
-    |
-    v
-[ Parser ]  ---> IR (Intermediate Representation)
-    |
-    v
-[ CompilerContext ]  (immutable: schema + name -> IR)
-    |
-    v
-[ Transforms ]  ---> mutated CompilerContext
-    |
-    v
-[ Codegen / Printer ]  ---> __generated__ artifacts + types
-```
-
-### 4.2 Intermediate Representation
-
-The IR is richer than a raw GraphQL AST. Conditional branches (`@include`, `@skip`) are represented as first-class nodes, making it trivial to target them in transforms. Fragment spreads, inline fragments, and directive arguments are all normalized structures.
-
-### 4.3 CompilerContext
-
-An immutable snapshot of the schema plus every document in the codebase, keyed by name. Transforms are pure functions `CompilerContext -> CompilerContext`, which keeps the pipeline composable and testable.
-
-### 4.4 Key transforms
-
-| Transform | Purpose |
-| --- | --- |
-| FlattenTransform | Inlines anonymous fragments on matching parent types, reducing indirection |
-| SkipRedundantNodeTransform | Removes fields fetched twice in overlapping branches |
-| MaskTransform | Enforces data masking at compile time |
-| ConnectionTransform | Rewrites `@connection` into the pagination machinery |
-| MatchTransform | Wires up `@match` / `@module` for 3D data-driven code splitting |
-| RefetchableFragmentTransform | Generates a refetch query for `@refetchable` fragments |
-
-### 4.5 Normalization and deduplication
-
-The compiler produces two artifacts per operation:
-
-- Reader AST — describes how to read a fragment from the store
-- Normalization AST — describes how to write a server response into the store
-
-Deduplication ensures fields requested in multiple nested fragments resolve to one selection in the network request. The Reader preserves the per-component view; the Normalization AST preserves the single canonical write.
-
-### 4.6 Type generation
-
-For each fragment and operation, the compiler emits type definitions:
-
-- `$data` — the shape a component receives from `useFragment` or `usePreloadedQuery`
-- `$key` — the opaque type a parent passes to a child's `useFragment` call
-- `$variables` / `Response` — types for operation inputs and outputs
-
-Type safety follows from the generated types; there is no runtime type checking.
-
-### 4.7 Data flow and transform examples
+### 4.1 Data flow and modules
 
 Source: v21 docs `principles-and-architecture/compiler-architecture` (same text in v20.1.0).
 
+```
+                   ┌─────────────┐┌─────────────┐
+                   │   GraphQL   ││   Schema    │
+                   └─────────────┘└─────────────┘
+                          │              │              parse
+                          └───────┬──────┘
+                                  ▼
+                   ┌────────────────────────────┐
+                   │      CompilerContext       │
+                   │                            │
+                   │   ┌─────┐ ┌─────┐ ┌─────┐  │──┐
+                   │   │ IR  │ │ IR  │ │ ... │  │  │
+                   │   └─────┘ └─────┘ └─────┘  │  │
+                   └────────────────────────────┘  │  transform/
+                          │    │      ▲            │   optimize
+                          │    │      └────────────┘
+                          │    │
+                          │    └──────────┐
+                          │  print        │  codegen
+                          ▼               ▼
+                   ┌─────────────┐ ┌─────────────┐
+                   │   GraphQL   │ │  Artifacts  │
+                   └─────────────┘ └─────────────┘
+```
+
 The compiler extracts GraphQL text from source files and parses it with the schema into IR. The IR documents form a `CompilerContext`. Transforms rewrite the context. Then the compiler prints GraphQL (to files, or to a persisted-query store) with the `Printer` and generates artifacts with codegen. The IR encodes more GraphQL semantics than a `graphql-js` AST: `@include` and `@skip` are nodes, so a transform can merge sibling fields that share a condition and cut the number of conditionals the runtime evaluates. The `RelayCompiler` module is a helper that combines these parts for the Relay runtime. Each transform makes one kind of change; an app configures several.
+
+`CompilerContext` is an immutable representation of a corpus of GraphQL documents. It contains the schema and a mapping of document names to IR. A `Transform` is a function that accepts a `CompilerContext` and returns a new, modified context.
+
+### 4.2 Transforms
 
 `FlattenTransform` inlines an anonymous fragment whose type matches the parent type:
 
-```graphql
-# before: id is processed twice
-foo { id ... on FooType { id } }
-# after: id is processed once
-foo { id }
+```
+# before: `id` is processed twice
+foo { # type FooType
+   id
+   ... on FooType { # matches the parent type, so this is extraneous
+     id
+   }
+ }
+
+ # after: `id` is processed once
+ foo {
+   id
+ }
 ```
 
 `SkipRedundantNodeTransform` extends flattening to harder duplicates: a field that the query fetches both unconditionally and conditionally, or through 2 different sub-fragments. The result processes each field at most once.
 
+### 4.3 Reader AST and Normalization AST
+
+Source: v21 docs `glossary/glossary`.
+
+- A reader AST reads the data selected in a given fragment. Operations and fragments both have reader ASTs. A reader AST records which fragments are spread at a location, and does not include the fields selected within these fragments.
+- A normalization AST belongs to an operation. With variables, it writes a network payload to the store, writes an optimistic response to the store, determines whether a query can be fulfilled from data in the store, and determines which records in the store are reachable (used in garbage collection). It includes the contents of nested fragments.
+- The generated artifact of an operation (for example `FooQuery.graphql.js`) contains both a normalization AST and a reader AST.
+
+### 4.4 Type generation
+
+Source: v21 docs `guided-tour/rendering/fragments`.
+
+The generated Flow types include a type for the fragment reference, with the `$key` suffix (`<fragment_name>$key`), and a type for the shape of the data, with the `$data` suffix (`<fragment_name>$data`).
+
 ## 5. Runtime Architecture
 
-The runtime executes reads, writes, subscriptions, and network requests against the normalized store.
+Source: v21 docs `principles-and-architecture/runtime-architecture`.
 
-### 5.1 Components
+### 5.1 Data types
 
-```
-+----------------------------------------------+
-|                  Environment                 |
-|   +----------------+     +---------------+   |
-|   |     Store      | <-> |    Network    |   |
-|   |  (source of    |     |  (fetch fn)   |   |
-|   |   truth)       |     +---------------+   |
-|   |                |                         |
-|   |  RecordSource  |                         |
-|   +----------------+                         |
-+----------------------------------------------+
-```
-
-| Component | Responsibility |
-| --- | --- |
-| `Environment` | Public API: fetch, commit, subscribe. Wraps Store + Network |
-| `Store` | Holds canonical RecordSource; manages subscriptions, retention, GC |
-| `RecordSource` | Keyed map of Records. Used for both the store and incoming patches |
-| `Record` | `{ id, __typename, fields }`. The graph node |
-| `Network` | `fetch(operation, variables, cacheConfig)` returns an Observable of payloads |
+- `DataID`: a globally unique or client-generated identifier for a record, stored as a string.
+- `Record`: a representation of a distinct data entity with an identity, type, and fields.
+- `RecordSource`: a collection of records keyed by their data ID. It represents both the cache and updates to it.
+- `Store`: the source of truth for an instance of `RelayRuntime`. It holds the canonical set of records as a `RecordSource`.
+- `Network`: provides methods for fetching query data from and executing mutations against an external data source.
+- `Environment`: an encapsulated environment that combines a `Store` and a `Network`. It is the main public API of `RelayRuntime`.
 
 ### 5.2 Data IDs
 
-Each Record has a globally unique data id. Sources:
-- The server-provided `id` field (preferred)
-- A client id derived from the path (`client:root:viewer:friends(first:10)`) when `id` is absent
-
-Relay depends on id stability for cache consistency. Two queries that return the same entity under different paths converge on the same Record.
+The data ID is the unique (with respect to the cache) identifier for a record. It is the value of an actual `id` field, or it derives from the path to the record from the nearest object with an `id`. Path-based IDs are client IDs, for example `client:842472:address`.
 
 ### 5.3 Reading a fragment
 
-```
-useFragment(fragmentRef)
-    |
-    v
-environment.lookup(selector)  --> Snapshot {
-    |                              data,          // fragment $data
-    v                              seenRecords,   // ids touched
-environment.subscribe(snap, cb)    isMissingData, // true if store incomplete
-                                   selector }
-```
-
-The Snapshot records exactly which record ids were read. Subscriptions fire only when one of those ids changes.
+Products access the store primarily via `lookup()` and `subscribe()`. `lookup()` reads the initial results of a fragment, and `subscribe()` observes that result for changes. The output of `lookup()`, a `Snapshot`, is the input to `subscribe()`. Higher-level APIs such as React/Relay manage this flow automatically.
 
 ### 5.4 Operation lifecycle
 
 ```
-fetch(operation, variables)
-    |
-    v
-Network.execute  -->  Observable<GraphQLResponse>
-    |
-    v
-Normalize response through Normalization AST
-    |
-    v
-Produce RecordSource of new/updated Records
-    |
-    v
-Store.publish(recordSource)  // merges into canonical source
-    |
-    v
-Store.notify()  // diffs snapshots, invokes changed subscriptions
-    |
-    v
-Components re-render with new fragment data
+               ┌───────────────────────┐
+               │         Query         │
+               └───────────────────────┘
+                           │
+                           ▼
+                                             ┌ ─ ─ ─ ┐
+                         fetch ◀────────────▶ Server
+                                             └ ─ ─ ─ ┘
+                           │
+                     ┌─────┴───────┐
+                     ▼             ▼
+               ┌──────────┐  ┌──────────┐
+               │  Query   │  │ Response │
+               └──────────┘  └──────────┘
+                     │             │
+                     └─────┬───────┘
+                           │
+                           ▼
+                       normalize
+                           │
+                           ▼
+               ┌───────────────────────┐
+               │     RecordSource      │
+               │                       │
+               │┌──────┐┌──────┐┌─────┐│
+               ││Record││Record││ ... ││
+               │└──────┘└──────┘└─────┘│
+               └───────────────────────┘
 ```
 
+The runtime fetches the query from the network, then traverses the query and the response together. It extracts the results into `Record` objects in a fresh `RecordSource`, then publishes that source to the store.
+
 Merge semantics:
-- New Records are added
-- Existing Records have fields merged field-by-field
-- Records that are null in the published source are deleted in the store (for explicit server deletions)
+- Records that exist only in the published source are added to the store
+- Records that exist in both are merged into a new record (inputs unchanged)
+- Records that are null in the published source are deleted (set to null) in the store
 - Records with a special sentinel value are removed from the store (this un-publishes optimistically created records)
 
 `publish()` does not call subscribers. `notify()` does. The split lets several payloads publish before one round of downstream work, such as rendering. `notify()` checks each subscription in 3 steps: (1) skip it when the changed record IDs do not overlap the IDs in its last `Snapshot`; (2) re-read it and skip it when the new result equals the old one; (3) call its callback. The `Store` API details are in `runtime.md`.
 
 ### 5.5 Garbage collection
 
-`environment.retain(operation)` marks an operation's root as live. When all retainers release, the Store marks the operation's reachable Records as eligible for GC. `useLazyLoadQuery` / `usePreloadedQuery` manage retention automatically for the duration the component is mounted.
+Relay runs garbage collection on the local in-memory store. It deletes data that no component in the app references. Query components that use `useQueryLoader` / `usePreloadedQuery` retain the query while they are mounted, and release it on unmount. `environment.retain()` retains a query outside of the component lifecycle.
 
 ### 5.6 Optimistic updates
 
-A mutation can attach an optimistic response or an optimistic updater. The Store layers the optimistic RecordSource on top of the canonical one and notifies subscribers immediately. When the server response arrives, the optimistic layer is rolled back and the real response is normalized and published.
+A mutation can attach an optimistic response or an optimistic updater. Relay rolls back the optimistic response when the mutation succeeds or errors.
 
-### 5.7 Observables and suspense
+### 5.7 Suspense
 
-Queries return Relay Observables (similar to RxJS). Hooks wire those into React Suspense: when a fragment's data is incomplete and a fetch is in flight, the hook throws the pending promise, letting Suspense boundaries show fallbacks. Once the fetch resolves and the store publishes, the component resumes.
+`usePreloadedQuery` suspends when the query is pending.
 
 ### 5.8 Selector, Snapshot, and Record access
 
@@ -356,29 +306,3 @@ Source: v21 docs `principles-and-architecture/runtime-architecture` (same text i
 - Code reaches `Record` objects only through the `RelayModernRecord` module. Do not assume a record is a plain object; the representation can change in one place.
 - `RecordSource` serves two roles: the store's record cache, and a patch that the runtime publishes to the store. The only implementation is the in-memory source; the interface also defines async record loading for future offline use.
 - A client ID derives from the path to the record from the nearest parent that has an `id`, for example `client:842472:address` for the `address` field of record `842472`.
-
-## 6. Why Relay vs Apollo/urql
-
-| Dimension | Relay | Apollo Client | urql |
-| --- | --- | --- | --- |
-| Core unit | Fragment (compile-time) | Query / typed-document-node | Query document |
-| Compiler | Required; generates artifacts + types | Optional codegen (separate tool) | Optional codegen |
-| Type safety | Enforced via generated `$data` / `$key` | User opts into codegen | User opts into codegen |
-| Data masking | Enforced at compile and runtime | Not enforced | Not enforced |
-| Store | Normalized by id; single source | Normalized by id (InMemoryCache) | Document cache default; graphcache exchange adds normalization |
-| Pagination | `@connection` spec + generated helpers | Field policies + `fetchMore` | Pagination exchange + manual merging |
-| Mutations | Declarative directives + updaters; optimistic layers | `update` callback + `optimisticResponse` | Updates via graphcache updaters |
-| Render model | Suspense-first, render-as-you-fetch | Hooks with loading booleans; Suspense opt-in | Hooks; Suspense opt-in |
-| Fragment composition | Core workflow | Supported but not idiomatic | Supported but not idiomatic |
-| Bundle cost | Higher (runtime + compiler pipeline) | Medium-large runtime | Small core, opt-in exchanges |
-| Setup overhead | High (compiler, schema, artifacts in build) | Low | Very low |
-| Best fit | Large apps with strict consistency and team velocity needs | Mid-size apps wanting flexibility | Small apps, custom caching strategies |
-
-### Architectural tradeoffs
-
-- Relay forces a build step. In return, the runtime is thin and the type system is exact.
-- Relay enforces fragment composition and data masking. In return, refactors are local and safe.
-- Relay standardizes pagination through connections. In return, list views are uniform across the codebase.
-- Apollo and urql optimize for flexibility and quick start. Relay optimizes for correctness and scale once the team has committed to GraphQL as the data layer.
-
-Relay is the right choice when the cost of the compiler is amortized across a large app with many components, teams, and long-lived data consistency requirements. For smaller apps or teams not ready to commit to the fragment-first workflow, Apollo or urql are lighter on ceremony.

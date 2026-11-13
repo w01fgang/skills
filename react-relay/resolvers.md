@@ -1,35 +1,45 @@
 # Relay Resolvers
 
-Relay Resolvers extend the GraphQL graph with values known only to the client. They let you model derived state, client-only data, third-party API results, and legacy stores (Redux, IndexedDB, localStorage) as fields on your GraphQL schema — consumed by the same hooks (`useFragment`, `useClientQuery`, `usePreloadedQuery`) as server data.
+Relay Resolvers augment Relay's GraphQL graph with values that are known only on the client. They schematize client state in the same way as server state, and product code uses Relay's familiar data-fetching APIs to access that state. Client state includes data from client-side data stores and derived data that Relay computes from other values in the graph.
 
 Runtime benefits:
 
 - Global memoization with garbage collection
-- Efficient reactive recomputation on input change
-- Fine-grained re-renders — only components reading a changed field update
+- Efficient reactive recomputation of resolvers
+- Efficient UI updates when data changes
 
-Use resolvers when state is:
+Resolvers can model:
 
-- Derived from other GraphQL fields (`fullName` from `firstName`/`lastName`)
-- Client-only (form state, selection, IndexedDB rows)
-- Fetched outside Relay (third-party search, end-to-end encrypted blobs)
-- Bridging legacy stores during migration
+- **User-created data**: complex form state, or other data that outlives a specific component tree
+- **Client-side database**: persistent data stores like IndexDB, localStorage, or SQLite
+- **Third-party APIs**: data that the client fetches directly from a third-party API, for example search results from a third-party search provider
+- **Encrypted data**: end-to-end encrypted data that is opaque on the server
+- **Legacy data stores**: data from pre-existing data layers, like Redux, so that migrated and un-migrated portions of the app stay in sync
+- **Derived data**: fields that are a pure function of other fields (see [Derived Fields](#derived-fields))
 
 ## Enabling
 
-Resolvers need no compiler feature flag. Run the compiler (`relay-compiler`). It reads each docblock that has a resolver tag (see the table below for your version) and ignores all other docblocks. It generates artifacts alongside your fragments.
+The Relay compiler looks at docblocks that include a resolver tag (see the table below for your version) and ignores all other docblocks.
 
-Configure `relayFieldLogger` on the Environment to record errors that resolver functions throw:
+When using Relay Resolvers, the docs recommend configuring a `relayFieldLogger` in your Relay Environment to track errors that resolver functions throw.
 
 ```ts
+import { Environment, RecordSource, RelayFeatureFlags } from "relay-runtime";
+import RelayModernStore from "relay-runtime/lib/store/RelayModernStore";
+
+// It is recommended to log errors thrown by Resolvers
+function fieldLogger(event) {
+  if(event.kind === "relay_resolver.error") {
+    // Log this somewhere!
+    console.warn(`Resolver error encountered in ${event.owner}.${event.fieldPath}`)
+    console.warn(event.error)
+  }
+}
+
 const environment = new Environment({
-  network,
-  store,
-  relayFieldLogger: (event) => {
-    if (event.kind === "relay_resolver.error") {
-      console.warn(`Resolver error in ${event.owner}.${event.fieldPath}`, event.error);
-    }
-  },
+  network: Network.create(/* your fetch function here */),
+  store: new RelayModernStore(new RecordSource()),
+  relayFieldLogger: fieldLogger
 });
 ```
 
@@ -60,184 +70,136 @@ These tags are the same in v20 and v21:
 
 ## Defining Fields
 
-A resolver is a named exported function plus a docblock. The function name **must** match the field name.
+A resolver field is an exported function that accepts an instance of the model type as its first argument and returns the field value. The exported function name must match the field name. A docblock with `@relayField` marks the function. To define a field on a GraphQL model type `TypeName`, add `TypeName`, a dot, and the field definition in GraphQL's schema definition language.
 
-```tsx
-// UserGreetingResolver.ts
-import type { UserModel } from "./UserModel";
-
+```js
 /**
- * @relayField User.greeting: String
- */
-export function greeting(user: UserModel): string {
-  return `Hello, ${user.name}!`;
-}
+* @relayField TypeName.fieldName(arg1: ArgTypeName): FieldTypeName
+*/
 ```
 
-For a field on a client type, the first argument is the model instance that the `@relayType` resolver returns. For a field on a server type, the resolver reads its data through `@rootFragment` (see [Derived Fields](#derived-fields)). Relay memoizes automatically — no `useMemo` needed.
-
-Consume it like any field:
+A simple field:
 
 ```tsx
-import { graphql, useFragment } from "react-relay";
-import type { UserGreeting$key } from "./__generated__/UserGreeting.graphql";
-
-function UserGreeting({ user }: { user: UserGreeting$key }) {
-  const data = useFragment(
-    graphql`
-      fragment UserGreeting on User {
-        greeting
-      }
-    `,
-    user,
-  );
-  return <h1>{data.greeting}</h1>;
+/**
+ * @relayField User.name: String
+ */
+export function name(user: UserModel): string {
+  return user.name;
 }
 ```
 
-A query that selects only client fields cannot use `usePreloadedQuery` or `useLazyLoadQuery`: both hooks assume a network request, and Flow reports a type error. Use `useClientQuery`, which behaves like `useLazyLoadQuery` with `fetchPolicy: 'store-only'`. A query that mixes client and server fields uses the standard hooks.
+For a field on a client type, the first argument is the model instance. For a field on a server type, the resolver reads its data through `@rootFragment` (see [Derived Fields](#derived-fields)). Relay efficiently recomputes resolvers when their inputs change, so you do not memoize your resolver function.
+
+The simplest resolver augments an existing type and has no inputs:
+
+```tsx
+/**
+ * @relayField Query.greeting: String
+ */
+export function greeting(): string {
+  return "Hello World";
+}
+```
+
+Consuming resolvers is identical to consuming a server field. Product code does not need to know which kind of field it reads.
+
+```tsx
+import {useClientQuery, graphql} from 'react-relay';
+
+function Greeting() {
+  const data = useClientQuery(graphql`
+    query GreetingQuery {
+      greeting
+    }`, {});
+  return <p>{data.greeting}</p>;
+}
+```
+
+A query that contains only client fields cannot use `usePreloadedQuery` or `useLazyLoadQuery`: both hooks assume they issue a network request, and Flow reports a type error. Use `useClientQuery`. A query that also contains server data uses the standard `useLazyLoadQuery` or `usePreloadedQuery` APIs.
 
 ## Defining Client-Only Types
 
-A client type is backed by a JavaScript model object. Two flavors: **strong** (has an ID, memoized) and **weak** (no ID, inline).
+Each client state GraphQL type is backed by a JavaScript object type, its model type. Resolvers on the type receive an instance of the model type as their first argument. A type is strong by default: each instance has an ID that is unique within the type. A weak type has no ID.
 
 ### Strong Types with @relayType
 
-Strong types have unique IDs. Define with a capitalized function matching the type name:
+Define a strong type with a docblock and an exported function. The function name matches the type name. It accepts an ID as its only argument and returns an instance of the type's model. This function is the model resolver for the type. Resolvers that define edges to this type return the ID of the object.
 
 ```tsx
-// TodoModel.ts
-import type { DataID } from "relay-runtime";
-import { TodoService } from "./TodoService";
-
-export type TodoModel = {
-  id: DataID;
-  text: string;
-  completed: boolean;
-};
-
 /**
- * @relayType Todo
+ * @relayType User
  */
-export function Todo(id: DataID): TodoModel {
-  return TodoService.getById(id);
-}
-
-/**
- * @relayField Todo.text: String
- */
-export function text(todo: TodoModel): string {
-  return todo.text;
-}
-
-/**
- * @relayField Todo.completed: Boolean
- */
-export function completed(todo: TodoModel): boolean {
-  return todo.completed;
+export function User(id: DataID): UserModel {
+  return UserService.getById(id);
 }
 ```
 
 ### Weak Types
 
-Weak types have no independent identity — they're bags of fields owned by a parent. Mark with `@weak`:
+If a type has no unique identifier, add the `@weak` docblock tag. A weak type is defined by a docblock followed by an exported type definition that matches the type's name. Resolvers that define edges to weak types return a fully populated model object that matches this type. Weak types create a namespace for a set of fields that belong to a parent object.
 
 ```tsx
 /**
  * @relayType ProfilePicture
  * @weak
  */
-export type ProfilePicture = {
-  url: string;
-  width: number;
-  height: number;
-};
-
-/**
- * @relayField User.profilePicture: ProfilePicture
- */
-export function profilePicture(user: UserModel): ProfilePicture {
-  return {
-    url: user.pic.url,
-    width: user.pic.width,
-    height: user.pic.height,
-  };
-}
+export type ProfilePicture = { url: string, height: number, width: number };
 ```
 
 ### Implementing Interfaces / Unions
 
-Resolver types can implement schema interfaces or participate in unions:
+Relay Resolver types can implement abstract types that the GraphQL schema defines. The abstract types can come from your GraphQL server schema or from a client schema extension. The same applies to unions.
 
 ```tsx
 /**
  * @relayType BasicUser implements IUser
  */
 export function BasicUser(id: DataID): BasicUserModel {
-  return { ...BasicUserService.getById(id), name: "Basic" };
-}
-```
-
-Include `__typename` when returning union members:
-
-```tsx
-/**
- * @relayField User.pet: Animal
- */
-export function pet(
-  user: UserModel,
-): { id: DataID; __typename: "Dog" | "Cat" } {
-  return { id: user.petId, __typename: user.petKind };
+  return { ...BasicUserService.getById(id), name: 'BasicUser1'};
 }
 ```
 
 ## Field Arguments
 
-Declare arguments in the docblock; they arrive as the second function argument.
+Define arguments in the field definition of the resolver's docblock. The resolver function reads the arguments as properties on its second argument.
 
 ```tsx
 /**
  * @relayField User.greet(salutation: String!): String
  */
-export function greet(
-  user: UserModel,
-  args: { salutation: string },
-): string {
+export function greet(user: UserModel, args: { salutation: string }): string {
   return `${args.salutation}, ${user.name}!`;
 }
 ```
 
-Query usage:
+Consuming this field requires passing the argument to the field in the GraphQL query:
 
 ```graphql
-query GreetQuery($salutation: String!) {
+query MyQuery($salutation: String!) {
   me {
     greet(salutation: $salutation)
   }
 }
 ```
 
-When a derived resolver reads a field that takes arguments, thread them through `@argumentDefinitions`:
+When a derived resolver reads a field that takes arguments, define an explicit fragment argument with `@argumentDefinitions` in the fragment definition. The resolver field then expects this argument as a field argument:
 
 ```tsx
 /**
  * @relayField User.fancyGreeting: String
  * @rootFragment UserFancyGreetingFragment
  */
-export function fancyGreeting(
-  key: UserFancyGreetingFragment$key,
-): string {
-  const user = readFragment(
-    graphql`
-      fragment UserFancyGreetingFragment on User
-      @argumentDefinitions(salutation: { type: "String!" }) {
-        name
-        greet(salutation: $salutation)
-      }
-    `,
-    key,
-  );
-  return `${user.name}: ${user.greet}`;
+export function fancyGreeting(key: UserFancyGreetingFragment$key): string {
+  const user = readFragment(graphql`
+    fragment UserFancyGreetingFragment on User @argumentDefinitions(
+      salutation: {type: "String"},
+    ) {
+      name
+      greet(salutation: $salutation)
+    }
+  `, key);
+  return `${user.name} says ${user.greet}`;
 }
 ```
 
@@ -249,24 +211,23 @@ Relay calls a resolver with these arguments, in this order:
 2. The field arguments object. The slot exists for every resolver; the value is `undefined` when the field declares no arguments.
 3. The resolver context (the `resolverContext` value of the `Store`).
 
-```tsx
+```js
+import type { LiveState } from 'relay-runtime';
+
 /**
  * @relayField Query.counter: Int
  * @live
  */
-export function counter(_args: void, context: AppContext): LiveState<number> {
-  return context.counterStore.asLiveState();
-}
-
-/**
- * @relayField Todo.label(prefix: String): String
- */
-export function label(
-  todo: TodoModel,
-  args: { prefix?: string },
-  context: AppContext,
-): string {
-  return `${args.prefix ?? context.defaultPrefix}${todo.text}`;
+export function counter(
+  _args,
+  context
+) {
+  return {
+    read: () => context.store.getState().counter,
+    subscribe: (callback) => {
+      return context.store.subscribe(callback);
+    },
+  };
 }
 ```
 
@@ -274,51 +235,51 @@ Source: `getResolverValue` in `packages/relay-runtime/store/RelayReader.js` (sam
 
 ## Derived Fields
 
-Derived resolvers are pure functions of other GraphQL fields. They use `@rootFragment` + `readFragment` from `relay-runtime`. Relay tracks the fragment's dependencies and recomputes only when those change — cheaper than a React `useMemo` because the result is shared across all components.
+Derived fields are a pure function of other fields. They exist on any type, server or client. A derived resolver defines a root fragment with the `@rootFragment` docblock tag followed by the name of the fragment. Relay passes the resolver function a fragment key for that fragment. The resolver reads the fragment data with `readFragment` imported from `relay-runtime`.
 
 ```tsx
-import { readFragment, graphql } from "relay-runtime";
-import type { UserFullNameFragment$key } from "./__generated__/UserFullNameFragment.graphql";
+import {readFragment} from 'relay-runtime';
 
 /**
  * @relayField User.fullName: String
  * @rootFragment UserFullNameFragment
  */
 export function fullName(key: UserFullNameFragment$key): string {
-  const user = readFragment(
-    graphql`
-      fragment UserFullNameFragment on User {
+  const user = readFragment(graphql`
+    fragment UserFullNameFragment on User {
         firstName
         lastName
-      }
-    `,
-    key,
-  );
+    }
+  `, key);
   return `${user.firstName} ${user.lastName}`;
 }
 ```
 
-When a derived resolver recomputes and returns the same value, the components that read it do not re-render. The cache is global: 2 sibling components that read the same field trigger 1 computation. A derived resolver works on any type, server or client. `readFragment()` works only inside a Relay Resolver; it throws in any other context.
+Relay tracks all the values that the resolver reads from the fragment and recomputes the resolver when any of those values change.
 
-Derived resolvers compose — they can read other resolvers:
+- **Global memoization**: Relay memoizes derived fields. The cache is shared by all components in the application, so 2 sibling components that read the same field trigger 1 computation.
+- **Efficient updates**: when a derived resolver recomputes and derives the same value, Relay avoids re-rendering the components that read the field.
+- **Composable**: derived fields combine with other derived fields.
+- **Discoverable**: values in the graph are discoverable via the GraphQL schema.
+
+`readFragment()` may only be used in Relay Resolvers. It throws an error in any other context.
+
+A derived resolver can read other resolver fields. This composition combines server data, client data and other derived resolvers:
 
 ```tsx
 /**
  * @relayField CheckoutItem.isValid: Boolean
  * @rootFragment CheckoutItemFragment
  */
-export function isValid(key: CheckoutItemFragment$key): boolean {
-  const item = readFragment(
-    graphql`
-      fragment CheckoutItemFragment on CheckoutItem {
-        product {
-          price
-        }
-        quantity
+export function isValid(key): boolean {
+  const item = readFragment(graphql`
+    fragment CheckoutItemFragment on CheckoutItem {
+      product {
+        price
       }
-    `,
-    key,
-  );
+      quantity
+    }
+  `, key);
   return item.product.price * item.quantity > 0;
 }
 
@@ -326,18 +287,15 @@ export function isValid(key: CheckoutItemFragment$key): boolean {
  * @relayField ShoppingCart.canCheckout: Boolean
  * @rootFragment ShoppingCartFragment
  */
-export function canCheckout(key: ShoppingCartFragment$key): boolean {
-  const cart = readFragment(
-    graphql`
-      fragment ShoppingCartFragment on ShoppingCart {
-        items {
-          isValid
-        }
+export function canCheckout(key): boolean {
+  const cart = readFragment(graphql`
+    fragment ShoppingCartFragment on ShoppingCart {
+      items {
+        isValid
       }
-    `,
-    key,
-  );
-  return cart.items.every((i) => i.isValid);
+    }
+  `, key);
+  return cart.items.every(item => item.isValid);
 }
 ```
 
@@ -359,7 +317,9 @@ Relay emits type assertions in the generated code. They flag a resolver whose re
 ### Scalars
 
 ```tsx
-/** @relayField Post.isValid: Boolean */
+/**
+ * @relayField Post.isValid: Boolean
+ */
 export function isValid(post: PostModel): boolean {
   return post.content !== "" && post.author != null;
 }
@@ -367,10 +327,12 @@ export function isValid(post: PostModel): boolean {
 
 ### Lists
 
-Any supported return type can be wrapped in a list (except raw server types):
+A resolver can return a list of the corresponding type. Any supported return type can be wrapped in a list, except server types:
 
 ```tsx
-/** @relayField User.favoriteColors: [String] */
+/**
+ * @relayField User.favoriteColors: [String]
+ */
 export function favoriteColors(user: UserModel): string[] {
   return user.favoriteColors;
 }
@@ -378,10 +340,13 @@ export function favoriteColors(user: UserModel): string[] {
 
 ### Edges to Strong Client Types
 
-Return `{ id: DataID }` — Relay invokes the type's model resolver to hydrate fields:
+Return `{ id: DataID }`. Relay invokes the model resolver function of the type:
 
 ```tsx
-/** @relayField Post.author: User */
+import {DataID} from 'relay-runtime';
+/**
+ * @relayField Post.author: User
+ */
 export function author(post: PostModel): { id: DataID } {
   return { id: post.authorId };
 }
@@ -389,43 +354,69 @@ export function author(post: PostModel): { id: DataID } {
 
 ### Edges to Weak Types
 
-Return the full object:
+Return an object that matches the model type of the weak type:
 
 ```tsx
-/** @relayField Post.cover: CoverImage */
-export function cover(post: PostModel): CoverImage {
-  return { url: post.coverUrl, alt: post.coverAlt };
+/**
+ * @relayField User.profilePicture: ProfilePicture
+ */
+export function profilePicture(user: UserModel): ProfilePicture {
+  return {
+    url: user.profilePicture.url,
+    width: user.profilePicture.width,
+    height: user.profilePicture.width,
+  }
 }
 ```
 
 ### Edges to Server Types (@waterfall)
 
-A resolver can point into the server graph by returning a `DataID`. The server type must implement the `Node` interface (global object identification). At compile time Relay derives a query for each selection on the field and fetches the data lazily at render. Consumers must annotate the selection with `@waterfall` to acknowledge the extra round trip:
+Resolvers can model edges to types that the server schema defines and that implement the `Node` specification. Each object that implements `Node` has a globally unique ID, so the resolver returns that ID. At compile time, Relay derives a GraphQL query for each selection on this field and lazily fetches that data on render.
 
 ```tsx
-/** @relayField Post.author: ServerUser */
+import {DataID} from 'relay-runtime';
+/**
+ * @relayField Post.author: User
+ */
 export function author(post: PostModel): DataID {
   return post.authorId;
 }
 ```
 
-```graphql
-query PostAuthorQuery($id: ID!) {
-  post(id: $id) {
-    author @waterfall {
-      name
-      avatarUrl
-    }
-  }
+Edges to server types that only the client knows force Relay to fetch data lazily. This forces an additional cascading network roundtrip, which is generally not optimal. At compile time, Relay requires the selection that reads a client-to-server edge field to carry the `@waterfall` directive:
+
+```tsx
+function Post() {
+  const data = useLazyLoadQuery(graphql`
+    query PostQuery {
+      post {
+        author @waterfall {
+          name
+        }
+      }
+    }`, {});
+  return <p>{data.post.author.name}</p>;
 }
 ```
 
 ### Abstract Types (interfaces and unions)
 
-A resolver field can return an interface or a union. Use the abstract type's name in the docblock and add `__typename` to the returned object. The object shape depends on the members:
+A resolver can return some permutations of abstract types (GraphQL unions and interfaces). Use the abstract type's name in the docblock field description and include the typename in the returned object. The object shape depends on the members:
 
-- Strong members: `{id: DataID, __typename: "Cat" | "Dog"}` (see the `pet` example above).
-- Weak members: `{__relay_model_instance: ModelType, __typename: "Cat" | "Dog"}`.
+- Strong members: `{id: DataID, __typename: string}`.
+- Weak members: `{__relay_model_instance: T, __typename: string}`.
+
+```tsx
+import {DataID} from 'relay-runtime';
+
+type AnimalTypenames = "Cat" | "Dog";
+/**
+ * @relayField User.pet: Animal
+ */
+export function pet(user: User): {id: DataID, __typename: AnimalTypenames } {
+  return {id: "5", __typename: "Dog" }
+}
+```
 
 Relay does not support these combinations:
 
@@ -433,27 +424,28 @@ Relay does not support these combinations:
 - Abstract types that mix strong and weak members.
 - Abstract types that include server-backed members.
 
-Resolvers cannot define the interface or the union. Define them in a client schema extension and let resolver types join them with `implements`:
+Resolvers cannot define the abstract types themselves. Define interfaces, unions and their members in a client schema extension:
 
-```graphql
-# client-schema.graphql
+```graphql title="client-schema.graphql"
 interface Animal {
-  legs: Int
+ legs: Int
 }
 
 extend type Cat implements Animal {
-  __do_not_use: String # placeholder: GraphQL forbids an empty field set
+  __do_not_use: String # Placeholder because GraphQL does not allow empty field sets.
 }
 ```
 
 ### RelayResolverValue Escape Hatch
 
-For arbitrary JS values that shouldn't be in the GraphQL schema (Dates, class instances), use `RelayResolverValue`. Keep the value immutable:
+For an arbitrary JavaScript value that has no corresponding GraphQL type, the custom return type `RelayResolverValue` returns any JavaScript value from the resolver. JavaScript values that resolvers return should be immutable.
 
 ```tsx
-/** @relayField Post.publishDate: RelayResolverValue */
-export function publishDate(post: PostModel): Date {
-  return new Date(post.publishTimestamp);
+/**
+ * @relayField Post.publishDate: RelayResolverValue
+ */
+export function metadata(post: PostModel): Date {
+  return post.publishDate;
 }
 ```
 
@@ -461,112 +453,76 @@ Consumers see a TypeScript or Flow type derived from the function's return type.
 
 ## Live Resolvers
 
-Live resolvers push updates into the Relay store. Add `@live` and return a `LiveState<T>`:
+Relay Resolvers support the `@live` docblock tag. Live resolvers return a `LiveState` shaped object. Relay calls its `read()` method to get the current value, and its `subscribe()` method to learn of changes to the value. When the value changes, Relay recomputes the derived fields that depend on the field, including transitive dependencies, and updates the components that read changed fields.
 
-```tsx
-export type LiveState<T> = {
-  read(): T;
-  subscribe(cb: () => void): () => void; // returns unsubscribe
-};
-```
+Both field resolvers and strong model resolvers may carry `@live`. `@live` on a type works on v20 and v21.
 
-`subscribe` receives only a notification — Relay calls `read()` itself when told the value changed.
+A `LiveState` is conceptually similar to an observable or a signal. When a `LiveState` notifies its subscriber of an update, the notification does not include the new value. Relay calls `read()` to get the new value. Over-notification, where the read value has not changed, is supported. For performance, the provider of the `LiveState` value confirms that the value changed before it notifies Relay.
 
 ### Redux bridge example
 
-```tsx
-import type { LiveState } from "relay-runtime";
-import { store, type AppState } from "./reduxStore";
+A helper function can read a reactive data store and return a `LiveState` object. For a Redux store, a wrapper can expose a `LiveState` for a given selector:
 
-type Selector<T> = (s: AppState) => T;
+```ts
+type Selector<T> = (state: State) => T;
 
 function selectorAsLiveState<T>(selector: Selector<T>): LiveState<T> {
-  let current = selector(store.getState());
+  let currentValue = selector(store.getState());
   return {
-    read: () => current,
-    subscribe: (cb) =>
-      store.subscribe(() => {
-        const next = selector(store.getState());
-        if (next === current) return;
-        current = next;
+    read: () => currentValue,
+    subscribe: (cb) => {
+      return store.subscribe(() => {
+        const newValue = selector(store.getState());
+        if (newValue === currentValue) {
+          return;
+        }
+        currentValue = newValue;
         cb();
-      }),
+      });
+    },
   };
 }
+```
 
+A live resolver that uses this helper:
+
+```tsx
 /**
  * @relayField Query.counter: Int
  * @live
  */
 export function counter(): LiveState<number> {
-  return selectorAsLiveState((s) => s.counter);
+  return selectorAsLiveState(getCounter);
+}
+
+function getCounter(state) {
+  return state.counter;
 }
 ```
-
-Consume in a component:
-
-```tsx
-import { graphql, useClientQuery } from "react-relay";
-
-function Counter() {
-  const data = useClientQuery(
-    graphql`
-      query CounterQuery {
-        counter
-      }
-    `,
-    {},
-  );
-  return <span>{data.counter}</span>;
-}
-```
-
-### Live strong types
-
-A strong type's model resolver can carry `@live` too. The model resolver then returns a `LiveState` of the model. Fields on the type receive the value that `read()` returns as their model argument. `@live` on a type works on v20 and v21 (v21 syntax shown).
-
-```tsx
-/**
- * @relayType Todo
- * @live
- */
-export function Todo(id: DataID): LiveState<TodoModel | null> {
-  return {
-    read: () => todoStore.get(id),
-    subscribe: (cb) => todoStore.subscribe(id, cb),
-  };
-}
-
-/**
- * @relayField Todo.text: String
- */
-export function text(todo: TodoModel | null): string | null {
-  return todo?.text ?? null;
-}
-```
-
-Because `read()` can return a missing item, type the model argument as nullable when the store can lose the item.
 
 ### Batching live updates
 
-When one action mutates many slices, wrap dispatch so Relay coalesces recomputation:
+One change in the data layer can notify many `@live` resolver subscriptions. By default each update makes Relay determine which components to update, which can duplicate work. Batch updates to `@live` resolvers by wrapping the state updates in a `batchLiveStateUpdates()` call on your `RelayStore` instance:
 
-```tsx
-// relayStore: the Relay Store instance that you pass to the Environment
+```ts
+const store = createStore(reducer);
 const originalDispatch = store.dispatch;
-store.dispatch = (action) => {
+
+function wrapped(action) {
   relayStore.batchLiveStateUpdates(() => {
     originalDispatch(action);
-  });
-};
+  })
+}
+
+store.dispatch = wrapped;
 ```
 
 ## Suspense
 
-A live resolver can suspend by returning the suspense sentinel from `read`. All consumers of that field (and anything transitively depending on it, even through a derived resolver's `@rootFragment`) suspend until the sentinel is replaced.
+If a live resolver is in a loading state, it can return the suspense sentinel value. All consumers of that field suspend until the field updates with a non-suspense value. A query or fragment suspends if it reads any resolver field in a suspended state, even if it reads that field indirectly via another resolver's `@rootFragment`.
 
-```tsx
-import { suspenseSentinel, type LiveState } from "relay-runtime";
+```ts
+import {suspenseSentinel} from 'relay-runtime';
 
 /**
  * @relayField Query.myIp: String
@@ -575,72 +531,52 @@ import { suspenseSentinel, type LiveState } from "relay-runtime";
 export function myIp(): LiveState<string> {
   return {
     read: () => {
-      const s = ipStore.getState();
-      if (s.status === "LOADING") return suspenseSentinel();
-      if (s.status === "READY") return s.value;
-      throw new Error("IP fetch failed");
+      const state = store.getState();
+      const ipLoadObject = state.ip;
+      if (ipLoadObject.status === "LOADING") {
+        return suspenseSentinel();
+      }
+      return state.ip;
     },
-    subscribe: (cb) => ipStore.subscribe(cb),
+    subscribe: (cb) => {
+      return store.subscribe(cb);
+    },
   };
-}
-```
-
-Wrap consumers in `<Suspense>`:
-
-```tsx
-function App() {
-  return (
-    <Suspense fallback={<Spinner />}>
-      <MyIpView />
-    </Suspense>
-  );
 }
 ```
 
 ## Error Handling
 
-If a resolver throws, Relay:
+If a resolver throws an error, Relay logs the error to the environment's user-provided `relayFieldLogger` and returns `null` for the field that the resolver defines. Resolver fields therefore cannot be typed non-null in the schema: the compiler does not allow it.
 
-1. Reports to the environment's `relayFieldLogger`
-2. Returns `null` for that field
-
-Resolver fields therefore **cannot be typed non-null** in the schema — the compiler rejects it.
-
-```tsx
-import { Environment, Network, RecordSource, Store } from "relay-runtime";
-
-function fieldLogger(event: {
-  kind: string;
-  owner: string;
-  fieldPath: string;
-  error?: Error;
-}) {
-  if (event.kind === "relay_resolver.error") {
-    console.warn(`Resolver error in ${event.owner}.${event.fieldPath}`);
-    console.warn(event.error);
+```ts
+function fieldLogger(event) {
+  if(event.kind === "relay_resolver.error") {
+    // Log this somewhere!
+    console.warn(`Resolver error encountered in ${event.owner}.${event.fieldPath}`)
+    console.warn(event.error)
   }
 }
 
 const environment = new Environment({
-  network: Network.create(fetchFn),
-  store: new Store(new RecordSource()),
-  relayFieldLogger: fieldLogger,
+  network: Network.create(/* your fetch function here */),
+  store: new RelayModernStore(new RecordSource()),
+  relayFieldLogger: fieldLogger
 });
 ```
 
 ### Logger event shape
 
-The `relayFieldLogger` receives this event for a thrown resolver error. The `errors` docs list the first 4 fields; the source type `RelayResolverErrorEvent` (`store/RelayStoreTypes.js`, v20.1.1 and v21.0.1) adds the last 3.
+The `relayFieldLogger` receives this event for a thrown resolver error. The `errors` docs list the first 4 fields. The `relayFieldLogger` docs add `shouldThrow` and `handled`.
 
 ```ts
-type RelayResolverErrorEvent = {
-  kind: "relay_resolver.error";
-  owner: string;      // fragment or query that read the field
-  fieldPath: string;  // path from the owner to the field
-  error: Error;       // the thrown error
-  shouldThrow: boolean;
-  handled: boolean;   // true when @catch or a nullable resolver handled it
-  uiContext: unknown;
+export type RelayResolverErrorEvent = {
+  +kind: 'relay_resolver.error',
+  +owner: string,
+  +fieldPath: string,
+  +error: Error,
+  +shouldThrow: boolean,
+  +handled: boolean,
 };
 ```
 
@@ -648,31 +584,16 @@ A live resolver can throw when Relay first evaluates it and when Relay calls `re
 
 ### @semanticNonNull
 
-When a field is *logically* required but must still be nullable for the error model, use `@semanticNonNull`. Clients can treat it as non-null in product code while Relay retains the right to null it on error:
+Relay resolver fields can be semantically non-null, like server schema fields. Add `@semanticNonNull` to the docblock of a resolver to mark the field as non-nullable in the semantic sense, while the client still handles errors:
 
-```tsx
+```ts
 /**
- * @relayField User.email: String @semanticNonNull
+ * @relayField RelayExample.semantic_non_null_field: String @semanticNonNull
  */
-export function email(user: UserModel): string {
-  return user.email ?? "unknown@example.com";
-}
-```
-
-### Handling expected errors
-
-For predictable fallbacks, return a default value instead of throwing:
-
-```tsx
-/**
- * @relayField User.avatarUrl: String
- */
-export function avatarUrl(user: UserModel): string {
-  try {
-    return buildAvatarUrl(user);
-  } catch {
-    return "/default-avatar.png";
-  }
+export function semantic_non_null_field(
+  model: RelayExampleModel,
+): string {
+  return model.someField ?? 'field was null, this is the default';
 }
 ```
 
@@ -683,9 +604,20 @@ Add `@deprecated` with an optional reason to mark a field deprecated. Add free t
 ```tsx
 /**
  * @relayField Author.fullName: String
- * @deprecated Use `displayName`. Names do not split into first and last.
  *
- * The author's first and last name, without honorifics.
+ * @deprecated Google "Falsehoods Programmers Believe About Names"
+ */
+export function fullName(author: AuthorModel): string {
+  return `${author.firstName} ${author.lastName}`;
+}
+```
+
+```tsx
+/**
+ * @relayField Author.fullName: String
+ *
+ * The author's first and last name. Does not include
+ * any [honorifics](https://en.wikipedia.org/wiki/Honorific).
  */
 export function fullName(author: AuthorModel): string {
   return `${author.firstName} ${author.lastName}`;
@@ -696,26 +628,11 @@ Descriptions on a type go in the `@relayType` docblock in the same way.
 
 ## Limitations
 
-- **No `info` argument** — standard GraphQL resolvers receive a context/info object; Relay Resolvers do not.
-- **Schema constructs** — input types, enums, and interfaces cannot be defined *by* resolvers (though resolver types can implement schema interfaces).
-- **No mutations** — resolvers support the read path only. Mutate underlying stores directly; live resolvers propagate the change.
-- **Lazy per-fragment evaluation** — resolvers run on read, not eagerly. If the implementation requires async work (e.g., a fetch inside `read`), you'll need a live resolver + suspense sentinel; there's no built-in async resolver.
-- **Nullable return types by default** — the compiler rejects a non-nullable resolver field, because a resolver that throws makes the field null. Use `@semanticNonNull` for logically-required fields.
-- **Docblock verbosity** — type information is duplicated between the docblock GraphQL signature and the TypeScript function.
-- **Context is store-wide** — pass `resolverContext` to the `Store` constructor: `new Store(source, { resolverContext: { store: customStore } })`. Each resolver receives that value as its last argument. Set `resolverContextType` in the compiler config to type-check it.
-- **Waterfalls through `@waterfall`** — edges into server types trigger extra round trips; the directive makes this explicit but doesn't eliminate the cost.
-
-## Decision Table
-
-| Need                                                              | Use                        | Why                                                                           |
-| ----------------------------------------------------------------- | -------------------------- | ----------------------------------------------------------------------------- |
-| Value derived from other GraphQL fields, shared across components | **Resolver (derived)**     | Global memoization, exposed in schema, auto-recomputes on dep change          |
-| Client-only entity with ID (todo, draft, selection set)           | **Resolver (strong type)** | Integrates with Relay store, fragments, pagination                            |
-| Reactive value from Redux / Zustand / Jotai / external store      | **Live resolver**          | `LiveState` bridges external pub/sub into Relay's reactive graph              |
-| Value fetched async from third-party API                          | **Live resolver + suspense sentinel** | Resolver can suspend consumers while loading                       |
-| Local UI state (open/closed, hover, input draft) scoped to one component | **`useState`**      | No need for graph membership; simpler, no compiler step                       |
-| State shared across a subtree but not the whole app               | **React Context**          | Cheaper than a resolver, avoids schema churn, fine for non-GraphQL concerns   |
-| Authoritative data owned by the server                            | **Server field**           | Single source of truth, supports mutations, network caching, normalization    |
-| Legacy store you're migrating to GraphQL                          | **Live resolver (bridge)** | Lets product code target the final schema while data still lives in Redux/etc |
-| One-off computation inside a single component                     | **`useMemo`**              | Resolver overhead not justified if not shared                                 |
-| Mutable collection with complex writes                            | **Server field + mutation** | Resolvers don't support mutations; keep writes on the server                  |
+- **No `info` argument**: standard GraphQL resolvers receive an `info` argument; Relay Resolvers do not.
+- **Schema constructs**: input types, enums, and interfaces cannot be defined by resolvers (though resolver types can implement schema interfaces).
+- **No mutations**: resolvers support only the read path.
+- **Lazy per-fragment evaluation**: resolvers are always evaluated lazily on a per-fragment basis. A resolver that is not read is never evaluated. If the client schema makes async requests as it reads data, waterfalls can occur.
+- **Nullable return types**: the compiler does not allow non-nullable resolver fields, because a resolver that throws makes the field null. Use `@semanticNonNull` for logically required fields.
+- **Docblock verbosity**: the docblock duplicates information that the function name and types already specify. Relay emits type assertions in its generated types to enforce that these values match.
+- **Context is store-wide**: pass `resolverContext` to the initialization of `RelayModernStore`: `new RelayModernStore(source, { resolverContext: { store: customStore } })`. Each resolver receives that value as its last argument. Set `resolverContextType` in the project config to type-check it.
+- **Waterfalls through `@waterfall`**: edges into server types trigger an extra network roundtrip.
