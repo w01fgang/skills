@@ -180,7 +180,7 @@ The parent component renders each child with `EntryPointContainer`:
 
 ```tsx
 // Dashboard.tsx
-import type {EntryPointComponent} from 'react-relay';
+import type {EntryPoint, EntryPointComponent} from 'react-relay';
 import type DashboardQueryType from './__generated__/DashboardQuery.graphql';
 import type UserProfile from './UserProfile';
 import type ActivityFeed from './ActivityFeed';
@@ -189,6 +189,8 @@ import {Suspense} from 'react';
 import {EntryPointContainer, graphql, usePreloadedQuery} from 'react-relay';
 
 type Queries = {dashboardQuery: DashboardQueryType};
+// Name the EntryPoint type of each child. The `entryPoints` prop holds the
+// matching PreloadedEntryPoint.
 type NestedEntryPoints = {
   profile: EntryPoint<typeof UserProfile>;
   feed: EntryPoint<typeof ActivityFeed>;
