@@ -144,7 +144,8 @@ The docs example calls `loadQuery({})`. Pass the variables that the query declar
 | Real-time updates | `useSubscription` |
 | Preload query + code split | EntryPoint APIs ([entrypoints.md](./entrypoints.md)) |
 | Add to a list | `@appendEdge` / `@prependEdge` on mutation payload |
-| Remove from a list | `@deleteEdge` / `@deleteRecord` |
+| Remove from a list | `@deleteEdge` |
+| Delete a record | `@deleteRecord` |
 | Derived/computed client state | Relay Resolver ([resolvers.md](./resolvers.md)) |
 | Outside React | `fetchQuery`, `commitMutation` ([runtime.md](./runtime.md)) |
 
@@ -175,5 +176,5 @@ The docs example calls `loadQuery({})`. Pass the variables that the query declar
 1. Compiler error? → [debugging.md](./debugging.md) § Common compiler errors, § Stale generated artifacts
 2. `Inconsistent __typename` warning? → [debugging.md](./debugging.md) § Typename
 3. Field unexpectedly null? → [debugging.md](./debugging.md) § Why is my field null?
-4. Mutation ran but UI didn't update? → [debugging.md](./debugging.md) + [updating-data.md](./updating-data.md) § Connections
+4. Mutation ran but UI didn't update? → [debugging.md](./debugging.md) + [updating-data.md](./updating-data.md) § Updating Connections
 5. Test hangs / never resolves? → [testing.md](./testing.md) § Troubleshooting

@@ -994,7 +994,7 @@ module.exports = FriendsListComponent;
 ```
 
 - `@stream_connection` accepts the same arguments as `@connection`, plus optional parameters that control streaming.
-- `initial_count: Int` — optional, defaults to zero. It sets how many items the initial payload includes. Relay streams any later items. With zero, the list starts empty and all items stream. The number does not change how many items the connection returns in total.
+- `initial_count: Int` — optional, defaults to zero (docs). The SDL at both tags (`relay-extensions.graphql`) declares `initial_count: Int!`, so pass it always. It sets how many items the initial payload includes. Relay streams any later items. With zero, the list starts empty and all items stream. The number does not change how many items the connection returns in total.
 - The connection updates as new items stream in from the server, and the component re-renders each time with the latest items.
 
 ### Multiple connections
@@ -1337,6 +1337,6 @@ module.exports = MyComponent;
 |---|---|---|
 | `useLazyLoadQuery` | `store-or-network`, `store-and-network`, `network-only`, `store-only` | `store-or-network` |
 | `useClientQuery` | none; it works as `useLazyLoadQuery` with `store-only` | `store-only` |
-| `loadQuery`, `useQueryLoader` loader | `store-or-network`, `store-and-network`, `network-only` | `store-or-network` |
+| `loadQuery`, `useQueryLoader` loader | `store-or-network`, `store-and-network`, `network-only`. The docs API page lists these 3. The source at v20.1.1 and v21.0.1 (`loadQuery.js`) also handles `store-only`. | `store-or-network` |
 | `refetch` of `useRefetchableFragment` and `usePaginationFragment` | `fetchPolicy` option; see "Fetch Policies" in the Relay docs | none |
 | `fetchQuery` | `network-only`, `store-or-network` | `network-only` |
