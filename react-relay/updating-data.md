@@ -100,8 +100,11 @@ The network layer is responsible for turning `uploadables` into a multipart requ
 
 ### cacheConfig
 
+The `useMutation` config type has no `cacheConfig` field. Pass `cacheConfig` to `commitMutation`:
+
 ```tsx
-commit({
+commitMutation(environment, {
+  mutation,
   variables,
   cacheConfig: { force: true, metadata: { trace: true } },
 });
@@ -605,7 +608,7 @@ const payload: FooQueryRawResponse = { node: { __typename: 'User', id: '1', name
 environment.commitPayload(op, payload);
 ```
 
-The payload is processed exactly like a network response: `@defer`, module-driven types, and data-driven dependencies all resolve normally. Use `@raw_response_type` on the query to generate the payload type.
+The payload is processed like a query response, and it resolves data-driven dependencies. Relay processes each `@defer` fragment at once from the payload data, because a client payload has no later incremental payload. Relay does not process `@stream` placeholders of a client payload. Use `@raw_response_type` on the query to generate the payload type.
 
 ---
 

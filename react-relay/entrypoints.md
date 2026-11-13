@@ -7,8 +7,9 @@ EntryPoints bundle **code** and **data** for a unit of UI (a route, modal, popov
 An EntryPoint is a lightweight object describing:
 
 - **`root`** — a `JSResource` pointing to the component module to render
-- **`getPreloadProps(params)`** — pure function mapping route params to the queries (and nested entrypoints) that must be preloaded before rendering
-- Optionally nested **`entryPoints`** — other EntryPoints to load in parallel
+- **`getPreloadProps(params)`** — pure function mapping route params to the queries that must be preloaded before rendering. It can also return:
+  - `entryPoints` — nested EntryPoints to load in parallel
+  - `extraProps` — passed to the component as the `extraProps` prop (`null` when absent)
 
 When loaded, Relay fires the queries *and* starts downloading the component chunk simultaneously. The component renders as soon as both are ready.
 
@@ -28,6 +29,7 @@ export interface JSResourceReference<T> {
   load(): Promise<T>;
   get(): T | undefined; // synchronous access once loaded
   getModuleIfRequired(): T | undefined;
+  getModuleId(): string;
 }
 
 export function JSResource<T>(
@@ -48,6 +50,7 @@ export function JSResource<T>(
     },
     get: () => resolved,
     getModuleIfRequired: () => resolved,
+    getModuleId: () => moduleId,
   };
 }
 ```
@@ -187,8 +190,8 @@ import {EntryPointContainer, graphql, usePreloadedQuery} from 'react-relay';
 
 type Queries = {dashboardQuery: DashboardQueryType};
 type NestedEntryPoints = {
-  profile: typeof UserProfile;
-  feed: typeof ActivityFeed;
+  profile: EntryPoint<typeof UserProfile>;
+  feed: EntryPoint<typeof ActivityFeed>;
 };
 
 const Dashboard: EntryPointComponent<Queries, NestedEntryPoints> = ({
@@ -269,7 +272,7 @@ function ProfileLauncher({userId}: {userId: string}) {
 ```
 
 Notes:
-- `loadEntryPoint` can throw if invoked during render — call it from an event handler or an effect.
+- Call `loadEntryPoint` from an event handler or an effect. The docs state that it can throw during React's render phase.
 - Data is written to the store when both AST and query response are available and stays retained until disposal.
 
 ## `loadEntryPoint` imperative
