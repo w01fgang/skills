@@ -77,7 +77,7 @@ Prefer server-side fixes — client workarounds are fragile.
 
 **Schema fix (preferred)**: encode type into the global ID. A common convention is `base64(Type:rawId)`, e.g. `VXNlcjox` for `User:1`. Keep resolvers symmetric with `node(id:)`.
 
-**Client-side fix**: set a custom `getDataID` on the `Store`:
+**Client-side fix**: set a custom `getDataID` on the `Store` and on the `Environment` (see the placement note below):
 
 ```js
 import { Environment, Network, RecordSource, Store } from 'relay-runtime';
@@ -90,6 +90,19 @@ const store = new Store(new RecordSource(), {
 This prefixes every record ID with its typename at normalization time, restoring uniqueness without server changes. Note: once set, you cannot later rely on raw `id` values as record IDs — `node(id:)` queries must use the same encoding.
 
 **Verification**: after the fix, clear the store (`environment.getStore().publish(new RecordSource())`) or hard-reload; the error should not recur.
+
+**`getDataID` placement**: `Environment` normalizes responses with its own `getDataID` option (`RelayModernEnvironment.js:141`, `:494`). An `Environment` built with an explicit `store` ignores a `getDataID` that only the `Store` receives. Pass `getDataID` in the `Environment` config as well:
+
+```js
+const getDataID = (fieldValue, typename) => `${typename}:${fieldValue.id}`;
+const environment = new Environment({
+  network,
+  getDataID,
+  store: new Store(new RecordSource(), { getDataID }),
+});
+```
+
+The v21 docs recommend the server-side fix: prefix the id of the less widely used type with a unique string and base64-encode it, and make `node(id:)` resolve it.
 
 ---
 
@@ -251,7 +264,7 @@ Error: The type `User` has no field `avatarUrll`.
   │     ^^^^^^^^^^ The type `User` has no field `avatarUrll`.
 ```
 
-Typo or schema drift. Update the schema file the compiler points at (`relay.config.json` → `schema`).
+Typo or schema drift. The compiler suggests a replacement when one is close: ``The type `UserInfo` has no field `mail`. Did you mean `email`?`` Update the schema file the compiler points at (`relay.config.json` → `schema`).
 
 ### Compiler error: fragment not found
 
@@ -335,20 +348,33 @@ const environment = new Environment({
 ### Event names
 
 - `execute.start` — operation starts; includes `variables`, `transactionID`.
-- `execute.next` — response payload received.
+- `execute.next.start` / `execute.next.end` — around each response payload.
 - `execute.complete` — operation finished.
 - `execute.error` — operation failed; includes `error`.
 - `execute.unsubscribe` — subscription cancelled.
 - `network.info` — network-layer info (e.g. cache hits).
 - `network.start` / `network.next` / `network.complete` / `network.error`.
 - `queryresource.fetch` — `useLazyLoadQuery` fetching.
-- `queryresource.retain` / `queryresource.release`.
+- `queryresource.retain`.
 - `store.publish` — records written to store; includes `source`.
-- `store.gc` — garbage collection ran; includes `references` retained.
+- `store.gc.start` / `store.gc.interrupted` / `store.gc.end` — around garbage collection; `store.gc.end` includes `references` retained.
 - `store.restore` — store restored from snapshot.
 - `store.snapshot` — snapshot taken.
 - `store.notify.start` / `store.notify.complete` — subscribers being notified.
 - `entrypoint.root.consume` — entrypoint resource read.
+
+The `LogEvent` type in `RelayStoreTypes.js` defines further events.
+
+| Group | Events |
+|---|---|
+| Suspense | `suspense.fragment`, `suspense.query`, `suspense.resolver` (v21 only), `suspense.client_edge` (v21 only), `suspense.missing_data` (v21 only) |
+| Reads | `fragmentresource.missing_data`, `pendingoperation.found`, `useFragment.subscription.missedUpdates`, `reader.fragmentSpread` (v21 only), `reader.read` (v21 only), `fetchquery.fetch` (v21 only) |
+| Network and execute | `network.unsubscribe`, `execute.async.module`, `execute.normalize.start`, `execute.normalize.end` |
+| Store | `store.datachecker.start`, `store.datachecker.end`, `store.datachecker.missing` (v21 only), `store.lookup.start`, `store.lookup.end`, `store.batch.start` (v21 only), `store.batch.complete` (v21 only), `store.notify.subscription` |
+| Resolvers | `liveresolver.batch.start`, `liveresolver.batch.end` |
+| Identity | `idCollision.typename` (fields `previous_typename`, `new_typename`) |
+
+`idCollision.typename` fires when 2 objects share an id and have different types. It needs `RelayFeatureFlags.ENABLE_STORE_ID_COLLISION_LOGGING` set to `true`.
 
 Filter noise in dev:
 
@@ -373,6 +399,19 @@ new Environment({
   },
 });
 ```
+
+The logger receives 6 event kinds. `owner` is the name of the operation or fragment. `fieldPath` is the dot-separated path from its root to the field.
+
+| `event.kind` | When it fires |
+|---|---|
+| `missing_expected_data.log` | The store lacks data that the parent query selected. Relay renders the field as `undefined`. |
+| `missing_expected_data.throw` | The same, inside an operation or fragment with `@throwOnFieldError`. Relay throws after the logger returns. |
+| `missing_required_field.log` | A `@required(action: LOG)` field is null or missing. |
+| `missing_required_field.throw` | A `@required(action: THROW)` field is null or missing. |
+| `relay_resolver.error` | A Relay Resolver threw. Relay coerces the error to null. |
+| `relay_field_payload.error` | The server response has a field-level error. |
+
+The `.throw`, `relay_resolver.error` and `relay_field_payload.error` events carry `handled`. Throw a custom error from the logger only when `handled` is `false`. A `@catch` directive or a null resolver result sets `handled` to `true`.
 
 ---
 
@@ -445,11 +484,110 @@ Break the cycle — one fragment should not transitively include itself.
 
 ---
 
+### Disallowed `id` type
+
+```
+Disallowed type `String` of field `id` on parent type `Foo` cannot be used by Relay to identify entities
+```
+
+The compiler accepts only `ID` or `ID!` for an `id` field outside the `Node` interface. Rename the field, or type it as `ID`. To keep the field, list the type and its `id` type in `nonNodeIdFields` (v21 docs; schema on the main branch):
+
+```json
+{
+  "relay": {
+    "schemaConfig": {
+      "nonNodeIdFields": { "allowedIdTypes": { "Foo": "String" } }
+    }
+  }
+}
+```
+
+The allowlist skips the check for that pair only. Components that select that `id` can stop re-rendering after a refetch.
+
+---
+
+## Compiler Tooling Reference
+
+### Config file locations
+
+The compiler searches these locations, in the order the v20.1 and v21.0.1 docs list them:
+
+1. `relay.config.json` in the project root
+2. `relay.config.(js|mjs|ts)` in the project root
+3. A `"relay"` key in `package.json`
+
+Pass a path as the positional `[CONFIG]` argument to override the search.
+
+### Multi-project config
+
+The compiler config schema on the main branch has 2 shapes. A single project uses top-level keys such as `src`, `schema` and `language`. Several projects use `sources`, `projects` and `generatedSources`. Each entry in `projects` takes `schema`, `schemaDir`, `output`, `base` and `persist`. The v21 docs do not describe this shape. Confirm the key names against your installed version with `relay-compiler config-json-schema`.
+
+### Compiler CLI flags
+
+| Flag | v20.1.1 | v21.0.1 | Effect |
+|---|---|---|---|
+| `--watch`, `-w` | yes | yes | Recompile on change. Needs watchman. |
+| `--project`, `-p` | yes | yes | Compile one project. Repeat for several. |
+| `--src`, `--schema`, `--artifactDirectory` | yes | yes | Rejected. The compiler does not accept a config on the command line; use a config file. |
+| `--repersist` | yes | yes | Run the persister even when a query did not change. |
+| `--validate` | yes | yes | Exit non-zero when artifacts are out of date. Write nothing. |
+| `--output` | yes | yes | Set the log level: `debug`, `quiet`, `quiet-with-errors`, `verbose`. |
+| `--noWatchman` | absent | yes | Use directory traversal. Conflicts with `--watch`. The v21 docs write `--no-watchman`; the clap definition uses camel case, so the source name is `--noWatchman`. The env variable `FORCE_NO_WATCHMAN` has the same effect on both versions. |
+| `config-json-schema` | yes | yes | Print the config JSON schema. |
+| `codemod <cmd>` | yes (2 commands) | yes (3 commands) | `fix-all` is absent on v20.1.1. The source of `fix-all` sits in `relay-codemod/src/codemod.rs`. |
+| `lsp` | yes | yes | Run the language server. `--locateCommand <script>` finds the definition for implementation-first schemas. |
+| `experimental-compare-document-ir` | absent | yes | Compare the IR of two documents. Experimental. |
+| `experimental-regenerate-sub-schema` | absent | yes | Replace the schema with the part the project uses. Experimental. |
+
+`relay-compiler --help` prints the full list for your installed version.
+
+### Document comparison (v21 only, experimental)
+
+`relay-compiler experimental-compare-document-ir --left <doc> --right <doc> --schemaPaths <schema>...` checks that every selection of `--left` exists in `--right`. Each document holds exactly 1 operation. The compiler inlines fragments, removes aliases and duplicate fields, and treats `user(id: $id)` as a superset of `user(id: 100)`. The output lists the missing selections with line numbers and paths, for example `* query -> viewer -> timezone_estimate -> gmt_offset`. Swap the arguments to find extra selections (over-fetching).
+
+### Codemods
+
+`relay-compiler codemod <name> [CONFIG] [-p <project>]` runs one of: `mark-dangerous-conditional-fragment-spreads` (option `-r`/`--rollout-percentage`), `remove-unnecessary-required-directives` and `fix-all` (v21 only). `fix-all` applies the fix of every fixable diagnostic. Run it after a Relay upgrade.
+
+### VS Code extension and LSP
+
+The Relay VS Code extension (marketplace id `meta.relay`) runs the compiler's LSP server. It gives compiler errors as editor problems, autocomplete and hover inside `graphql` tags, click-to-definition and quick fixes. The extension reads the same config file as the CLI. The v21 docs and the v20.1 docs name the same extension.
+
+### ESLint plugin (`eslint-plugin-relay`)
+
+Source: the v21 docs. The plugin package sits outside the Relay repository, so the rule behavior is not checked against source here.
+
+| Rule | Checks |
+|---|---|
+| `relay/unused-fields` | Each selected field is used in the module that selects it. |
+| `relay/must-colocate-fragment-spreads` | A module imports the module that defines each fragment it spreads. Depends on globally unique module names. |
+| `relay/no-future-added-value` | Code does not handle the `%future added value` enum placeholder. |
+| `relay/graphql-syntax` | Each `graphql` tag parses. |
+| `relay/graphql-naming` | Fragment and operation names follow the Relay naming rules. |
+| `relay/function-required-argument` | `readInlineData` gets an explicit argument. |
+| `relay/hook-required-argument` | Relay hooks get an explicit argument. |
+
+Config: `relay.configs['ts-recommended'].rules` in `eslint.config.js`. Suppress `unused-fields` and `must-colocate-fragment-spreads` with `# eslint-disable-next-line relay/<rule>` on the line before the field. `eslint-disable-line` does not work inside `graphql` tags.
+
+### Babel plugin with `artifactDirectory`
+
+When the compiler config sets `artifactDirectory`, the Babel plugin needs the same value:
+
+```json
+{
+  "plugins": [["relay", { "artifactDirectory": "./src/__generated__" }]]
+}
+```
+
+The Babel plugin must run before other plugins. The v21 docs name framework plugins for Vite, Next.js and SWC.
+
+---
+
 ## Diagnostic flowchart
 
 | Symptom | First check | Second check | Fix |
 |---|---|---|---|
-| Console: inconsistent `__typename` | DevTools store inspector for the ID | Are two types sharing raw IDs? | Encode typename into ID on server, or set `getDataID` on Store |
+| Console: inconsistent `__typename` | DevTools store inspector for the ID | Are two types sharing raw IDs? | Encode typename into ID on server, or set `getDataID` on Environment and Store |
 | `Expected a handler for deleteRecord` | Custom `handlerProvider` passed? | Does it cover all mutation handles? | Register `MutationHandlers.*` handlers |
 | `@appendEdge` inserts but list doesn't update | Connection ID in store | Does mutation's `connections` array match exactly? | Use `ConnectionHandler.getConnectionID` with same filters |
 | Field null in component | DevTools Network response | Is value null in raw payload? | Fix server resolver or add field to fragment |

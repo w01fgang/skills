@@ -190,7 +190,58 @@ Local file alternative (no persistence server):
 }
 ```
 
-You ship `persisted_queries.json` with the client bundle and the server reads the same file.
+Ship `persisted_queries.json` to the server at deploy time. The browser bundle needs the file only with the Automatic Persisted Queries handshake.
+
+### `persistConfig` options
+
+`persistConfig` converts the text of every query and mutation into an id. The same options exist on v20.1 and v21.
+
+| Key | Meaning |
+|---|---|
+| `url` | The compiler sends one POST request for each operation. The body is form-encoded (`application/x-www-form-urlencoded`) with the parameter `text`. The endpoint answers with JSON `{ "id": "<id>" }`. |
+| `params` | Extra form parameters that the compiler adds to the POST body. |
+| `file` | Path of a local JSON file. The compiler writes the map `id → operation text` to it. Use `file` or `url`. |
+| `algorithm` | Hash for the local file: `MD5`, `SHA256` or `SHA1`. The default is `MD5`. |
+
+The compiler config schema on the `main` branch lists more keys. They are not confirmed for v21.0.1. Print the schema of your installed version with `relay-compiler config-json-schema` before you use them.
+
+- Remote: `headers`, `concurrency`, `includeQueryText`.
+- Local: `include_query_text` (snake case).
+- A multi-project config names the option `persist`.
+
+The flag `relay-compiler --repersist` runs the persister even when a query did not change.
+
+### Persist endpoint contract
+
+```js
+// Minimal persist endpoint: POST text=<operation> -> { id }
+const params = new URLSearchParams(body);
+const text = params.get('text');
+if (text == null) return res.writeHead(400).end('Expected `text` parameter');
+const id = md5(text); // the same algorithm as the client expects
+queryMap.set(id, text);
+res.end(JSON.stringify({ id }));
+```
+
+### Get the query map to the server
+
+| Setup | Approach |
+|---|---|
+| Client and server share one project | Both read the map file from a common location. |
+| Separate projects | Push the map at compile time: `"relay": "relay-compiler && npm run push-queries"`. The script can `git push` to the server repository or save the map to a database. |
+| Server has no map | Implement the Automatic Persisted Queries handshake. A cache miss costs 1 extra round trip, and the map file ships to the browser, which increases the bundle size. The server recovers by itself when its store is wiped. |
+
+With Express, the `persistedQueries` middleware from `express-graphql-persisted-queries` resolves the id:
+
+```js
+app.use(
+  '/graphql',
+  persistedQueries({ queryMap, queryIdKey: 'doc_id' }),
+  graphqlHTTP({ schema })
+);
+```
+
+`relay-compiler --watch` together with `persistConfig` regenerates the query map on every change. This fits only an app where client and server run together on localhost and the server hot-reloads the map file.
 
 ### fetchFn for persisted queries
 
@@ -337,6 +388,23 @@ const config = useMemo(() => ({
 useSubscription(config);
 ```
 
+`useSubscription` and `requestSubscription` accept these config fields:
+
+| Field | Purpose |
+|---|---|
+| `subscription` | The `graphql` literal. |
+| `variables` | Variables for the subscription. |
+| `onNext` | Runs for each payload. It receives the response up to the fragment spread boundaries. |
+| `onError` | Runs when the subscription fails. |
+| `onCompleted` | Runs when the server ends the subscription. |
+| `updater` | Imperative store update for each payload. |
+
+- Memoize the config object. `useSubscription` disposes and re-creates the subscription when the config identity changes.
+- Relay establishes the subscription when the hook commits. It does not subscribe during render.
+- Spread the fragments of the components that show the data in the subscription selection. Those components then update from the payload.
+- `@deleteRecord`, `@appendEdge` and `@prependEdge` work in subscriptions.
+- The legacy `subscriptions-transport-ws` client needs `Observable.from(client.request({ query: request.text, operationName: request.name, variables }))` to convert its observable to the Relay type.
+
 ---
 
 ## 8. Multipart responses for `@defer` / `@stream`
@@ -400,6 +468,22 @@ function isAsyncIterable(input) {
 ```
 
 The `Accept` header signals the server to stream. Without an iterable body Relay gets a single payload as before.
+
+### Payload shape that Relay reads
+
+`OperationExecutor` splits the parts that `sink.next` receives into initial and incremental payloads.
+
+| Part | Required fields |
+|---|---|
+| Initial | `data` (and `errors` when present) |
+| `@defer` | `data` for the deferred selection, `path` (array of keys), `label` (string) |
+| `@stream` | `data` holds 1 list item, `path` ends with the field name and the item index, `label` |
+
+- `path` and `label` are both present or both absent. Otherwise Relay throws `invalid incremental payload`.
+- `sink.next` also accepts an array of payloads.
+- Relay reads `data`, `path` and `label` at the top level of a part. The Relay runtime has no handling for an `incremental` array. If the server groups parts in `incremental`, split them in `fetchFn` before `sink.next`.
+- A payload with `extensions: { is_final: true }` marks the last payload. If the first payload is final and the operation contains `@defer` or `@stream`, Relay logs a warning that the server ran in non-streaming mode.
+- `deferDeduplicatedFields: true` in the `Environment` config stops Relay from throwing on fields that a deferred response omits (v21 only; absent in the v20.1.1 source). Use it when the server follows a spec proposal that does not repeat fields in deferred responses.
 
 ---
 
@@ -540,6 +624,36 @@ type PageInfo {
 
 Connection fields take `first/after` (forward) or `last/before` (backward). Cursors are opaque strings. This is the contract `usePaginationFragment` relies on; without it, pagination cannot be generated.
 
+Relay makes two core assumptions about the server: a mechanism to refetch an object (11.1) and a description of how to page through connections (11.2). The base64 form of ids and cursors is a convention that marks them as opaque. Pass to `node(id:)` only an unaltered `id` that the server returned.
+
+If the server uses other names for the connection fields, set the names in both places. The values must match.
+
+```json
+{
+  "relay": {
+    "schemaConfig": {
+      "connectionInterface": { "endCursor": "end_cursor", "hasNextPage": "has_next_page" }
+    }
+  }
+}
+```
+
+```ts
+import { ConnectionInterface } from 'relay-runtime';
+
+ConnectionInterface.inject({
+  END_CURSOR: 'end_cursor',
+  HAS_NEXT_PAGE: 'has_next_page',
+  HAS_PREV_PAGE: 'has_previous_page',
+  START_CURSOR: 'start_cursor',
+  PAGE_INFO: 'page_info',
+  NODE: 'node',
+  CURSOR: 'cursor',
+  EDGES: 'edges',
+  PAGE_INFO_TYPE: 'PageInfo',
+});
+```
+
 ### 11.3 Mutations
 
 Relay recommends single-argument, named input mutations:
@@ -633,6 +747,16 @@ Without this, fragment references fall back to `any`. With it, the compiler emit
 - `FooFragment$key` (opaque fragment reference)
 - `FooFragment$data`
 
+The Babel plugin needs the same directory. Add it to the plugin options:
+
+```json
+{
+  "plugins": [["relay", { "artifactDirectory": "./src/__generated__" }]]
+}
+```
+
+Alias the directory in the module resolver so that imports do not use long relative paths.
+
 Your `fetchFn` works with raw `GraphQLResponse` from `relay-runtime`; the typed surface is the hook output.
 
 ---
@@ -658,6 +782,10 @@ Your `fetchFn` works with raw `GraphQLResponse` from `relay-runtime`; the typed 
 | `request.id` is null in prod | `persistConfig` not set, or compiler run without it | Add `persistConfig` and re-run `relay-compiler`. |
 | Subscription never unsubscribes | `Observable.create` callback didn't return cleanup | Return the `wsClient.subscribe` disposer. |
 | `cacheConfig.force` ignored | fetchFn shares responses from an in-memory cache | Bypass your cache when `cacheConfig.force === true`. |
+| `@defer` data never appears although parts arrive | Parts use an `incremental` array or lack `path`/`label` | Send each part as `{ data, path, label }`, or split `incremental` in `fetchFn`. |
+| `invalid incremental payload` error | Part has `path` without `label`, or `label` without `path` | Send both fields, or neither for the initial payload. |
+| Babel plugin cannot find artifacts | Compiler uses `artifactDirectory` and the plugin does not | Set `artifactDirectory` in the plugin options too. |
+| Pagination breaks after renaming connection fields | Compiler and runtime use different connection names | Set `schemaConfig.connectionInterface` and call `ConnectionInterface.inject` with the same values. |
 
 ---
 

@@ -799,7 +799,7 @@ const { data, loadPrevious, hasPrevious, loadNext, hasNext } =
 
 Use `@stream_connection` in place of `@connection` to receive the items of a
 connection as the server produces them. The directive takes the arguments of
-`@connection` and the optional `initial_count: Int` (default 0). The first
+`@connection` and `initial_count: Int!`. The SDL requires `initial_count`. The first
 payload contains `initial_count` items, and the rest stream in. The connection
 updates and the component re-renders for each streamed item.
 

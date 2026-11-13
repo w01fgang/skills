@@ -137,6 +137,23 @@ Rules of thumb:
 
 With `store-or-network`, a cache hit returns synchronously without suspending — enabling instant navigation.
 
+### 3.3 Availability and Render Policy
+
+`environment.check(operation)` returns an object with a `status` key: `{ status: 'available', fetchTime }`, `{ status: 'stale' }` or `{ status: 'missing' }`. Compare `result.status`, not the result. `check` runs the `missingFieldHandlers` first and writes the values they return into the store.
+
+`useLazyLoadQuery` and `usePreloadedQuery` combine the status, the fetch policy and the render policy as follows (`QueryResource._fetchAndSaveQuery`):
+
+| Fetch policy | Sends a request when | Renders before the response when |
+|---|---|---|
+| `store-or-network` | status is not `available` | status is `available`, or status is `missing` under the default render policy |
+| `store-and-network` | always | same as `store-or-network` |
+| `network-only` | always | never (suspends) |
+| `store-only` | never | always |
+
+A `stale` query does not render before the response. It suspends until the network request returns. A component that is already mounted keeps rendering its stale data; the staleness check runs when a new request starts (for example in `loadQuery`).
+
+The default render policy is `partial`. The environment option `UNSTABLE_defaultRenderPolicy` and the `useLazyLoadQuery` option `UNSTABLE_renderPolicy` set it. Both options are undocumented. Any value other than `partial` renders a non-`available` query only after the response arrives. The sections below ("Rendering Partially Cached Data") describe the `partial` behavior.
+
 ---
 
 ## 4. Query Retention & Garbage Collection
@@ -326,12 +343,33 @@ function Profile({ userRef }: { userRef: Profile_user$key }) {
 
 Without this subscription, the mounted component continues to display the stale data until it unmounts/remounts, at which point the next read sees the stale flag and refetches.
 
+The hook subscribes again whenever the id list or the callback identity changes. Wrap the callback in `useCallback` to keep one subscription. The hook returns a `Disposable`, and it disposes the subscription on unmount.
+
+Outside React, use the store methods that the hook calls:
+
+```ts
+const store = environment.getStore();
+const state = store.lookupInvalidationState([userId]);
+const disposable = store.subscribeToInvalidationState(state, () => {
+  // refetch or update the view
+});
+```
+
+### 5.4.1 Stale Definition
+
+A query is stale when it can be fulfilled from the store and one of these holds:
+
+- The time since the last fetch is greater than `queryCacheExpirationTime`.
+- The query references at least one invalidated record.
+
+Without `queryCacheExpirationTime`, only invalidation marks a query stale.
+
 ### 5.5 How `useLazyLoadQuery` Handles Staleness
 
 On each render, `useLazyLoadQuery` checks whether the query is present *and* non-stale:
 
 - Present + fresh → synchronous cache hit, no network request.
-- Present + stale (invalidated or past `queryCacheExpirationTime`) → still returns cached data for `store-or-network`, *plus* triggers a network request; component re-renders when the response arrives.
+- Present + stale (invalidated or past `queryCacheExpirationTime`) → `store-or-network` and `store-and-network` send a network request and suspend until the response arrives.
 - Missing → suspends, fetches.
 
 ---
@@ -438,6 +476,33 @@ const environment = new Environment({
 During cache evaluation, when Relay encounters a missing field, it runs matching handlers before declaring the query incomplete. A handler that returns `undefined` is a no-op; a handler that returns a valid ID/value satisfies the miss and the query can be served from cache.
 
 Common handlers to add: `node(id:)` → `id`, `user(id:)` → `id`, `viewer()` → a well-known viewer record ID.
+
+### 7.3 Handler Signature and Plural Example
+
+Every handler has the signature `handle(field, parentRecord, args, store)`. The fourth argument is a read-only record source proxy. A `pluralLinked` handler returns an array of record IDs:
+
+```ts
+const missingFieldHandlers = [
+  {
+    kind: 'pluralLinked' as const,
+    handle(field, record, args) {
+      if (record?.getType() === ROOT_TYPE && field.name === 'nodes' && Array.isArray(args.ids)) {
+        return args.ids; // Query.nodes(ids) -> records with those IDs
+      }
+    },
+  },
+  {
+    kind: 'scalar' as const,
+    handle(field, record) {
+      if (field.name === 'displayName' && record?.getType() === 'User') {
+        return record.getValue('name'); // derive a missing scalar from a cached one
+      }
+    },
+  },
+];
+```
+
+Relay runs a matching handler each time it finds a missing field while it checks the cache for a query (`environment.check`). A handler that returns `undefined` leaves the field missing.
 
 ---
 
@@ -569,6 +634,9 @@ Mounted readers of that record should use `useSubscribeToInvalidationState` to r
 | Pagination resets unexpectedly | `invalidateRecord` on a connection parent | Use explicit `ConnectionHandler` edge insertion instead |
 | `useLazyLoadQuery` unretains too eagerly with StrictMode double-invoke | Mount/unmount/mount race outpaces release buffer | Prefer `useQueryLoader` + `usePreloadedQuery`; or increase `gcReleaseBufferSize` |
 | Mounted list doesn't reflect a new record written via updater | Connection not updated | Insert edge via `ConnectionHandler.insertEdgeBefore/After` in the mutation updater |
+| `environment.check(query) === 'stale'` is never true | `check` returns an object | Compare `environment.check(query).status` |
+| A cached query suspends after `invalidateRecord` | A stale query renders only after the response arrives | Wrap in `<Suspense>`; keep the mounted view and refetch it with `useSubscribeToInvalidationState` |
+| Invalidation callback fires more than once or re-subscribes every render | Callback identity changes on each render | Wrap the callback in `useCallback` |
 
 ---
 

@@ -305,8 +305,8 @@ mutation DeletePosts($input: DeletePostsInput!, $connections: [ID!]!) {
 
 ### `@deleteRecord`
 
-Removes the record itself from the Relay store (and from any connection that
-holds it).
+Deletes the record from the Relay store. An edge that still points to the
+record reads `undefined`.
 
 **Signature** — `@deleteRecord` (no args).
 
@@ -322,8 +322,8 @@ mutation DeleteUser($input: DeleteUserInput!) {
 
 **Pitfalls**
 - The field must literally be an ID scalar. Wrap object responses accordingly.
-- `@deleteRecord` purges globally; use `@deleteEdge` when you only want to
-  detach from specific connections.
+- `@deleteRecord` deletes the record for every reader. Use `@deleteEdge` to
+  remove an edge from specific connections.
 
 ---
 

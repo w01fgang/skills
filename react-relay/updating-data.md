@@ -256,8 +256,8 @@ commit({
 ### Execution order
 
 1. Apply `optimisticResponse`.
-2. Run `optimisticUpdater`.
-3. Apply optimistic declarative directives (`@appendEdge`, ...).
+2. Apply optimistic declarative directives (`@appendEdge`, ...).
+3. Run `optimisticUpdater`.
 4. Server resolves.
 5. Roll back all optimistic changes.
 6. Apply real response, apply real directives, run `updater`.
@@ -270,7 +270,7 @@ Rollback rules:
 - Relay reverts every optimistic change of a mutation when the response or the error arrives.
 - If another write changes the store while the mutation is in flight, Relay reverts the optimistic update, applies the write, and re-applies the optimistic update.
 - Relay does not recalculate a second optimistic value after the first one rolls back. With 2 optimistic responses that each add 1 to a like count, the first rollback leaves the count at +2. Use `optimisticUpdater` to compute the value from the store.
-- In the v21 source (`RelayPublishQueue._publishSourceFromPayload`), the handlers behind the declarative directives (`@appendEdge`, `@deleteEdge`, ...) run before the real `updater`. Do not rely on `updater` seeing the store before the directives apply.
+- In the v20 and v21 source (`RelayPublishQueue`), the handlers behind the declarative directives (`@appendEdge`, `@deleteEdge`, ...) run before `optimisticUpdater` and before the real `updater`. The guided tour lists the updater first; the list above follows the source.
 
 ---
 

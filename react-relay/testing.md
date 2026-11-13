@@ -12,7 +12,7 @@ npm install --save-dev relay-test-utils @testing-library/react @testing-library/
 
 ## Core APIs
 
-Two exports from `relay-test-utils`:
+The main exports from `relay-test-utils` (the package also exports `MockEnvironment`, `unwrapContainer` and `testResolver`):
 
 - `createMockEnvironment()` — returns a `RelayMockEnvironment` (an `Environment` plus a `.mock` controller).
 - `MockPayloadGenerator` — synthesizes payloads from an operation descriptor.
@@ -32,9 +32,46 @@ The `.mock` controller on the environment exposes:
 | `reject(request, error)` | Fail a specific request. |
 | `queueOperationResolver(resolver)` | Auto-resolve subsequent operations. |
 | `queuePendingOperation(query, variables)` | Pre-seed an operation so `usePreloadedQuery` will not suspend indefinitely. |
-| `isLoading(request)` | `true` if pending. |
+| `isLoading(request, variables, cacheConfig?)` | `true` if pending. |
 | `cachePayload(request, vars, payload)` | Seed the QueryResponse cache. |
 | `clearCache()` | Reset cache. |
+
+### Mock method rules
+
+- `isLoading(request, variables, cacheConfig?)` takes the variables of the request. It returns `true` while a matching request is pending.
+- `reject(request, error)` accepts an `Error` or a string. A string becomes `new Error(string)`.
+- `nextValue(request, payload)` requires an object with a `data` key. Other values throw `MockEnvironment(): Expected payload to be an object with a `data` key.`
+- `resolve(request, payload)` accepts one payload or an array of payloads. It emits each payload and then completes the request.
+- `getMostRecentOperation()` throws when no operation is pending.
+- `queueOperationResolver(resolver)` registers a one-shot resolver. Relay checks only the first resolver in the queue when an operation starts.
+  - A resolver that returns a payload resolves the operation and leaves the queue.
+  - A resolver that returns an `Error` rejects the operation and leaves the queue.
+  - A resolver that returns `null` or `undefined` stays in the queue, and the operation stays pending.
+  - A resolver applies only to an operation that is pending in the environment. Register one resolver for each operation you expect.
+
+## `createMockEnvironment(config)`
+
+The function accepts an optional `Partial<EnvironmentConfig>`. It spreads the config over its defaults. Pass `store`, `missingFieldHandlers`, `handlerProvider`, `getDataID`, `log` or `relayFieldLogger` to test the same wiring as production.
+
+```ts
+import { Store, RecordSource } from 'relay-runtime';
+
+const environment = createMockEnvironment({
+  store: new Store(new RecordSource(), { gcReleaseBufferSize: 0 }),
+  missingFieldHandlers,
+});
+```
+
+A `network` key replaces the mock network. `environment.mock.*` cannot resolve operations after that.
+
+When `NODE_ENV` is `test`, the environment wraps `execute`, `executeMutation`, `executeSubscription`, `executeWithSource`, `applyUpdate`, `commitPayload`, `getStore`, `lookup`, `check`, `subscribe` and `retain` in `jest.fn`. The store methods `getSource`, `lookup`, `notify`, `publish`, `retain` and `subscribe` are wrapped too.
+
+```ts
+expect(environment.executeMutation).toHaveBeenCalledTimes(1);
+environment.mockClear();
+```
+
+`environment.mockClear()` resets those mocks, the pending operations, the pending requests, the response cache and the record source.
 
 ## Enabling `@relay_test_operation`
 
@@ -117,6 +154,28 @@ MockPayloadGenerator.generate(operation, {
 
 A resolver for a type applies wherever that type appears in the selection set.
 
+## Default Mock Values
+
+`MockPayloadGenerator` uses these values when no resolver matches.
+
+| Type | Default |
+|---|---|
+| `ID` | `<TypeName-mock-id-N>` (`<mock-id-N>` when the parent type is unknown) |
+| `String` and scalars without type metadata | `<mock-value-for-field-"fieldName">` |
+| `Int` | `42` |
+| `Float` | `4.2` |
+| `Boolean` | `false` |
+| Enum (needs `@relay_test_operation`) | First enum value |
+| `__typename` of an abstract type | `__MockObject` |
+
+Each call to `MockPayloadGenerator.generate` creates a new id counter that starts at 1. Two `generate` calls on one environment produce the same ids unless the resolvers add a prefix or an offset.
+
+Fields inside `@client` extensions (client schema extensions) stay empty by default. Pass `mockClientData` to generate them:
+
+```ts
+MockPayloadGenerator.generate(operation, resolvers, { mockClientData: true });
+```
+
 ## Path-Aware Mocks with `context`
 
 Resolvers receive `(context, generateId)`. `context` has:
@@ -138,7 +197,42 @@ MockPayloadGenerator.generate(operation, {
 });
 ```
 
-`generateId()` returns a monotonically increasing integer per test run — useful for unique IDs without collisions.
+`generateId()` returns an integer that increases within one `generate()` call. The count starts at 1 again for each `generate()` call.
+
+## Deferred Fragments: `generateWithDefer`
+
+`MockPayloadGenerator.generateWithDefer(operation, resolvers, options)` generates the initial payload and, on request, the payloads for `@defer` and `@stream` selections.
+
+- With `{ generateDeferredPayload: true }`, it returns an array. The first element is the initial payload. Each next element has `path`, `label` and `data` for one deferred selection.
+- Without the option, it returns the initial payload only.
+- A `@defer(if: $var)` or `@stream(if: $var)` selection produces a deferred payload only when the variable is truthy.
+
+```tsx
+test('renders deferred fragment data', () => {
+  const environment = createMockEnvironment();
+  render(
+    <RelayEnvironmentProvider environment={environment}>
+      <Suspense fallback={null}>
+        <ParentComponent />
+      </Suspense>
+    </RelayEnvironmentProvider>
+  );
+
+  act(() => {
+    const operation = environment.mock.getMostRecentOperation();
+    const payloads = MockPayloadGenerator.generateWithDefer(
+      operation,
+      { User: () => ({ id: 'u_1', name: 'Alice' }) },
+      { generateDeferredPayload: true }
+    );
+    environment.mock.resolve(operation, payloads);
+  });
+
+  expect(screen.getByText('Alice')).toBeInTheDocument();
+});
+```
+
+Pass the operation as the first argument of `environment.mock.resolve`. The v21 guide example calls `environment.mock.resolve(mockData)` with one argument, which does not match the source signature.
 
 ## Resolving Operations
 
@@ -394,6 +488,16 @@ import { act } from '@testing-library/react';
 act(() => { jest.runAllImmediates(); });
 ```
 
+### Debugging a Preloaded Query Test
+
+- `usePreloadedQuery` suspends forever when the resolver never runs. The resolver runs only when the query and the variables match the pending operation. Check for a different query, different variables, or arrays in a different order.
+- Log `JSON.stringify(operation, null, 2)` inside the resolver. Find the `concreteType` of the object to mock. The sibling `selections` array lists the fields that the query selects on it.
+- Mock the type that the field returns. A wrong type produces values such as `<mock-value-for-field-"formatted_amount">`.
+- `context.args` holds the field arguments only for the innermost field call that selects the mocked type.
+- Use one environment for the component and for the test. A nested `RelayEnvironmentProvider` with another environment bypasses the mocks.
+- If `loadQuery` runs in a `useEffect`, call `act(() => jest.runAllImmediates())` after the render.
+- The v21 guide names the load call `preloadQuery`. The hook-based API in `react-relay` is `loadQuery`.
+
 ## Testing Mutations
 
 Cover three paths: optimistic update, success, error.
@@ -563,6 +667,82 @@ test('receives subscription updates', () => {
 });
 ```
 
+## Testing Query States: Loading, Error, Data
+
+A query component has 3 states. Test each one with a fresh environment.
+
+```tsx
+test('shows the error state when the request fails', async () => {
+  const environment = createMockEnvironment();
+  render(
+    <RelayEnvironmentProvider environment={environment}>
+      <ErrorBoundary fallback={<div>Something failed</div>}>
+        <Suspense fallback={<div>Loading</div>}>
+          <UserCard id="u_1" />
+        </Suspense>
+      </ErrorBoundary>
+    </RelayEnvironmentProvider>
+  );
+
+  act(() => {
+    environment.mock.rejectMostRecentOperation(new Error('Uh-oh'));
+  });
+
+  expect(await screen.findByText('Something failed')).toBeInTheDocument();
+});
+```
+
+To resolve a query before the first render, register `environment.mock.queueOperationResolver(() => new Error('Uh-oh'))` or a payload resolver and then render.
+
+## Testing Refetch (`useRefetchableFragment`)
+
+Wrap the fragment in a test query as in "Testing Fragments in Isolation". Click the refetch control and resolve the new operation with changed mock data.
+
+```tsx
+act(() => {
+  environment.mock.resolveMostRecentOperation(op =>
+    MockPayloadGenerator.generate(op)
+  );
+});
+
+fireEvent.click(screen.getByRole('button', { name: /refetch/i }));
+
+act(() => {
+  environment.mock.resolveMostRecentOperation(op =>
+    MockPayloadGenerator.generate(op, { User: () => ({ name: 'Bob' }) })
+  );
+});
+
+expect(await screen.findByText('Bob')).toBeInTheDocument();
+```
+
+## Testing Mutation and Subscription Callbacks
+
+Code that calls `commitMutation` or `requestSubscription` directly can be tested with `jest.fn` callbacks.
+
+```ts
+const onCompleted = jest.fn();
+commitMutation(environment, { mutation, variables, onCompleted });
+const operation = environment.mock.getMostRecentOperation();
+act(() => {
+  environment.mock.resolve(operation, MockPayloadGenerator.generate(operation));
+});
+expect(onCompleted).toHaveBeenCalled();
+
+const onNext = jest.fn();
+requestSubscription(environment, { subscription, variables, onNext });
+const subscriptionOperation = environment.mock.getMostRecentOperation();
+act(() => {
+  environment.mock.nextValue(
+    subscriptionOperation,
+    MockPayloadGenerator.generate(subscriptionOperation)
+  );
+});
+expect(onNext).toHaveBeenCalled();
+```
+
+Assert on rendered output or callback arguments. Snapshot assertions (`toMatchSnapshot`) shorten the Relay guide examples but are not the recommended way to assert.
+
 ## Full RTL Setup Example
 
 ```tsx
@@ -641,3 +821,8 @@ Relay generates artifacts via `relay-compiler`. Run it before tests. The Jest tr
 | "Operation not found" in `findOperation` | Predicate too strict or query name differs | Log `getAllOperations().map(o => o.fragment.node.name)` and match exactly. |
 | Optimistic update not seen | Asserted after server resolve | Assert immediately after the mutation dispatch, before `resolveMostRecentOperation`. |
 | Subscription only emits once | Used `resolve` instead of `nextValue` | Use `nextValue` for each payload; `complete` when done. |
+| `nextValue` throws "Expected payload to be an object with a `data` key" | Passed the `data` object without the wrapper | Pass the result of `MockPayloadGenerator.generate`, or `{ data: ... }`. |
+| Second queued resolver never runs | The first resolver in the queue returned `null` | Make the first resolver return a payload or an `Error`, or register resolvers in operation order. |
+| Mock values look like `<mock-value-for-field-"x">` | Mocked the wrong type | Log the operation JSON and mock the type that owns the field. |
+| Deferred data never renders | Used `generate` for a query with `@defer` | Use `generateWithDefer` with `generateDeferredPayload: true` and resolve with the returned array. |
+| Client-only fields are empty | `@client` fields are skipped by default | Pass `{ mockClientData: true }` as the third argument of `generate`. |

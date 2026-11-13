@@ -471,8 +471,8 @@ Source: `mutations/commitMutation.js`; docs `api-reference/relay-runtime/commit-
 
 Source: docs `guided-tour/updating-data/graphql-mutations`, `imperatively-modifying-store-data`.
 
-1. Relay writes `optimisticResponse` to the store, then runs `optimisticUpdater`, then applies the declarative directives to the optimistic response.
-2. On success, Relay rolls back the optimistic changes, writes the server response, runs `updater` (the payload is a root field of the store proxy), applies the directives to the response, then calls `onCompleted`.
+1. Relay writes `optimisticResponse` to the store, then applies the declarative directives to the optimistic response, then runs `optimisticUpdater`.
+2. On success, Relay rolls back the optimistic changes, writes the server response, applies the directives to the response, runs `updater` (the payload is a root field of the store proxy), then calls `onCompleted`.
 3. On failure, Relay rolls back the optimistic changes and calls `onError`.
 
 Rules for updater code:
