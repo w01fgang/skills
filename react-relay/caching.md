@@ -1,158 +1,99 @@
 # Caching & Data Freshness
 
-Relay's normalized store is the heart of its caching story. Every field fetched by any query is flattened into a record graph keyed by global IDs, so data fetched by one query can often be served from the cache when a sibling query asks for an overlapping shape. This reference covers what lives in the cache, how long it stays there, how to control freshness, and how to render partially-cached screens without flash-of-loading states.
-
-All examples use hooks (`useLazyLoadQuery`, `useQueryLoader`, `usePreloadedQuery`, `useFragment`, `useSubscribeToInvalidationState`).
+Relay maintains a normalized data store, so components that observe the same data stay in sync even if they reach it by different queries. This reference covers what lives in the cache, how long it stays there, how to control freshness, and how to render partially cached screens.
 
 ---
 
 ## 1. The Mental Model
 
-A Relay `Environment` owns a `Store`, which owns a `RecordSource` (a map of `dataID -> Record`). When a query response arrives, Relay:
-
-1. Normalizes the response into flat records keyed by `id` (or a synthetic ID for unidentified objects).
-2. Writes records into the `RecordSource`.
-3. Notifies subscribed components of affected IDs so they re-read from the store.
-
-Because data is normalized, a `user(id: 4) { name }` write is visible to any later query that touches user `4`, regardless of how it reached that node (via `node(id: 4)`, a connection edge, a fragment spread, etc).
-
 Three questions drive everything in this document:
 
-- **Presence** — do we have any data for this query shape in the store?
+- **Presence** — is the data for this query in the store?
 - **Staleness** — is that data still considered fresh?
-- **Retention** — who is keeping this data alive, and when can GC delete it?
+- **Retention** — who keeps this data alive, and when can garbage collection (GC) delete it?
 
 ---
 
 ## 2. Fetch Policies
 
-Fetch policies are the primary knob for trading latency for freshness. They are accepted by `useLazyLoadQuery`, `loadQuery` (via `useQueryLoader`), and `refetch`. `fetchQuery` accepts `network-only` (its default) and `store-or-network` only.
+Pass a `fetchPolicy` to the `loadQuery` function, which `useQueryLoader` provides:
 
-### 2.1 The Four Policies
+```js
+const React = require('React');
+const {graphql} = require('react-relay');
+
+function AppTabs() {
+  const [
+    queryRef,
+    loadQuery,
+  ] = useQueryLoader(HomeTabQuery);
+
+  const onSelectHomeTab = () => {
+    loadQuery({id: '4'}, {fetchPolicy: 'store-or-network'});
+  }
+
+  // ...
+}
+```
+
+`useLazyLoadQuery` takes the `fetchPolicy` in its options argument:
+
+```js
+const React = require('React');
+
+const {graphql, useLazyLoadQuery} = require('react-relay');
+
+function App() {
+  const data = useLazyLoadQuery(
+    graphql`
+      query AppQuery($id: ID!) {
+        user(id: $id) {
+          name
+        }
+      }
+    `,
+    {id: 4},
+    {fetchPolicy: 'store-or-network'},
+  );
+
+ return <h1>{data.user?.name}</h1>;
+}
+```
+
+The `fetchPolicy` determines:
+
+- whether the query is fulfilled from the local cache, and
+- whether a network request is made to fetch the query from the server, depending on the availability of the data for that query in the store.
+
+The `refetch` function also takes a `fetchPolicy`. `fetchQuery` supports only `network-only` (the default) and `store-or-network`.
+
+### The Four Policies
 
 | Policy | Use cache? | Send network request? |
 |---|---|---|
-| `store-or-network` *(default)* | Yes | Only if data missing or stale |
+| `store-or-network` *(default)* | Yes | Only if data is missing or stale |
 | `store-and-network` | Yes | Always |
 | `network-only` | No | Always |
 | `store-only` | Yes | Never |
 
-#### `store-or-network` (default)
-
-Reuse cached data if the query is fully available and fresh; otherwise fetch from the network. This is the right choice for ~80% of queries — page transitions, repeat visits, detail views opened from a list.
-
-```tsx
-import { useLazyLoadQuery, graphql } from 'react-relay';
-
-function ProfileScreen({ userId }: { userId: string }) {
-  const data = useLazyLoadQuery<ProfileQuery>(
-    graphql`
-      query ProfileQuery($id: ID!) {
-        user(id: $id) {
-          name
-          avatarUrl
-        }
-      }
-    `,
-    { id: userId },
-    { fetchPolicy: 'store-or-network' }, // default, can omit
-  );
-  return <Profile user={data.user} />;
-}
-```
-
-#### `store-and-network`
-
-Render cached data immediately, then revalidate from the network. The component shows something instantly, and re-renders when the fresh response lands. Good for dashboards, feeds, and anything where "stale while revalidate" is the desired UX.
-
-```tsx
-const data = useLazyLoadQuery<FeedQuery>(
-  FeedQueryNode,
-  { first: 20 },
-  { fetchPolicy: 'store-and-network' },
-);
-```
-
-#### `network-only`
-
-Ignore the cache entirely. Use for actions where a stale answer is worse than a spinner: post-mutation confirmations, payment status, anything behind a "Refresh" button the user explicitly pressed.
-
-```tsx
-const [queryRef, loadQuery] = useQueryLoader<OrderStatusQuery>(OrderStatusQueryNode);
-
-function refresh() {
-  loadQuery({ orderId }, { fetchPolicy: 'network-only' });
-}
-```
-
-Note: the response *is* written to the store after arrival — subsequent `store-or-network` reads will see it. "Network-only" only bypasses the cache on *read*.
-
-#### `store-only`
-
-Never hit the network. Caller guarantees data is already present (e.g. written by a mutation optimistic updater, seeded by SSR, or prefetched by another route). Also useful for reading client-only fields from a client schema extension.
-
-```tsx
-const data = useLazyLoadQuery<PreloadedQuery>(
-  PreloadedQueryNode,
-  vars,
-  { fetchPolicy: 'store-only' },
-);
-```
-
-### 2.2 Decision Tree
-
-```
-Need guaranteed fresh data?         -> network-only
-Data pre-seeded / client-only?      -> store-only
-UX tolerates brief stale flash
-while revalidating?                 -> store-and-network
-Otherwise (default)                 -> store-or-network
-```
+- `store-or-network`: reuses locally cached data. Sends a network request only if any data for the query is missing or stale. If the query is fully cached, no network request is made.
+- `store-and-network`: reuses locally cached data and always sends a network request, regardless of whether data was missing or stale in the store.
+- `network-only`: does not reuse locally cached data and always sends a network request, ignoring any data that might be locally cached and whether it is missing or stale.
+- `store-only`: only reuses locally cached data and never sends a network request. The caller fetches the query. This policy can also read and operate on data that is entirely local.
 
 ---
 
 ## 3. Presence of Data (Cache Hits)
 
-A query is considered *present* when every selection in the operation can be satisfied from the store. This is evaluated per-field, walking the normalized graph starting from the query root.
+Data in the Relay store for a given query is present after the query has been fetched for the first time, as long as that query is rendered on the screen. If data was never fetched for a query, it is missing from the store.
 
-### 3.1 What Counts as "Present"
+Relay runs *Garbage Collection* to delete data that no component in the app references. If GC deletes data too soon, the next read cannot reuse it and waits on a network request.
 
-Data for a query is present after the query has been fetched *and* while at least one component is mounted that retains it (or it is still inside the GC release buffer). Without a retainer, GC may delete the records at any time, causing the next read to be a miss.
+Usually, the app infrastructure configures GC and data retention at the `RelayEnvironment` level.
 
-Rules of thumb:
+### Availability Check
 
-- If the query was never fetched, it is a miss.
-- If some fields are missing (e.g. a newly-added selection), it is a miss for the operation as a whole.
-- Fields reached only through a child fragment spread do *not* count against the outer query's presence check — fragment components have their own suspense boundary (see §6).
-
-### 3.2 Suspense on Miss
-
-`useLazyLoadQuery` and `usePreloadedQuery` throw a promise (suspend) when data is missing and a network request is in-flight. Wrap the rendering tree in `<Suspense>`:
-
-```tsx
-<Suspense fallback={<Spinner />}>
-  <ProfileScreen userId={id} />
-</Suspense>
-```
-
-With `store-or-network`, a cache hit returns synchronously without suspending — enabling instant navigation.
-
-### 3.3 Availability and Render Policy
-
-`environment.check(operation)` returns an object with a `status` key: `{ status: 'available', fetchTime }`, `{ status: 'stale' }` or `{ status: 'missing' }`. Compare `result.status`, not the result. `check` runs the `missingFieldHandlers` first and writes the values they return into the store.
-
-`useLazyLoadQuery` and `usePreloadedQuery` combine the status, the fetch policy and the render policy as follows (`QueryResource._fetchAndSaveQuery`):
-
-| Fetch policy | Sends a request when | Renders before the response when |
-|---|---|---|
-| `store-or-network` | status is not `available` | status is `available`, or status is `missing` under the default render policy |
-| `store-and-network` | always | same as `store-or-network` |
-| `network-only` | always | never (suspends) |
-| `store-only` | never | always |
-
-A `stale` query does not render before the response. It suspends until the network request returns. A component that is already mounted keeps rendering its stale data; the staleness check runs when a new request starts (for example in `loadQuery`).
-
-The default render policy is `partial`. The environment option `UNSTABLE_defaultRenderPolicy` and the `useLazyLoadQuery` option `UNSTABLE_renderPolicy` set it. Both options are undocumented. Any value other than `partial` renders a non-`available` query only after the response arrives. The sections below ("Rendering Partially Cached Data") describe the `partial` behavior.
+`environment.check(operation)` returns an object with a `status` key (`'available'`, `'stale'` or `'missing'`). Compare `result.status` with `'stale'`, not the result.
 
 ---
 
@@ -160,491 +101,417 @@ The default render policy is `partial`. The environment option `UNSTABLE_default
 
 ### 4.1 What Retention Means
 
-"Retaining" a query tells Relay: *do not GC the records reachable from this query's root selection*. As long as at least one retainer holds a given operation (query + variables), its data stays in the store.
+Retaining a query tells Relay not to delete the data for that query and variables. Multiple callers can retain a single query. As long as at least one caller retains the query, it stays in the store.
 
-When all retainers release, the query enters a **release buffer**. If it is not re-retained within the buffer window, GC eventually evicts its exclusively-owned records.
+By default, query components that use `useQueryLoader` / `usePreloadedQuery` or the other Relay APIs retain the query as long as they are mounted. After they unmount, they release the query. The query might be deleted at any point after that.
 
-### 4.2 Automatic Retention via Hooks
+### 4.2 Manual Retention with `environment.retain()`
 
-Under the hood, the hooks retain their queries for you:
+To retain a query outside of the component lifecycle, use `environment.retain`:
 
-| Hook | Retained while |
-|---|---|
-| `useLazyLoadQuery(query, vars, options)` | Component is mounted |
-| `useQueryLoader(query)` + `loadQuery()` | `queryRef` is held (retention disposed when `disposeQuery()` is called or the loader is unmounted) |
-| `usePreloadedQuery(query, queryRef)` | Component is mounted *and* the backing `queryRef` is alive |
-
-The `useQueryLoader` pattern is especially powerful for navigation: you can load a query before the destination component is rendered, and the `queryRef` keeps the data retained through the transition.
-
-```tsx
-function App() {
-  const [queryRef, loadQuery, disposeQuery] =
-    useQueryLoader<ProfileQuery>(ProfileQueryNode);
-
-  return (
-    <>
-      <button onClick={() => loadQuery({ id: '4' })}>
-        Open profile
-      </button>
-      <Suspense fallback={<Spinner />}>
-        {queryRef && <Profile queryRef={queryRef} />}
-      </Suspense>
-      <button onClick={disposeQuery}>Close</button>
-    </>
-  );
-}
-
-function Profile({ queryRef }: { queryRef: PreloadedQuery<ProfileQuery> }) {
-  const data = usePreloadedQuery(ProfileQueryNode, queryRef);
-  return <h1>{data.user?.name}</h1>;
-}
-```
-
-### 4.3 Manual Retention with `environment.retain()`
-
-Outside React (routers, infra code, prefetchers), retain a query descriptor directly:
-
-```ts
-import {
+```js
+const {
   createOperationDescriptor,
   getRequest,
   graphql,
-} from 'relay-runtime';
+} = require('relay-runtime')
 
-const query = graphql`
-  query PrefetchQuery($id: ID!) {
-    user(id: $id) { name }
-  }
-`;
+// Query graphql object
+const query = graphql`...`;
 
-const request = getRequest(query);
-const descriptor = createOperationDescriptor(request, { id: '4' });
+// Construct Relay's internal representation of the query
+const queryRequest = getRequest(query);
+const queryDescriptor = createOperationDescriptor(
+  queryRequest,
+  variables
+);
 
-const disposable = environment.retain(descriptor);
-// ... later
+// Retain query; this will prevent the data for this query and
+// variables from being garbage collected by Relay
+const disposable = environment.retain(queryDescriptor);
+
+// Disposing of the disposable will release the data for this query
+// and variables, meaning that it can be deleted at any moment
+// by Relay's garbage collection if it hasn't been retained elsewhere
 disposable.dispose();
 ```
 
-`retain()` is idempotent per caller — each call returns its own disposable, and the query stays alive until every disposable is disposed. This is a low-level API; application code should almost always rely on hooks.
+Relay manages query data retention for mounted query components. Product code usually does not call `retain` directly. Infra-level code, such as a Router, handles advanced cases.
+
+### 4.3 GC Scheduler
+
+The `gcScheduler` is a function you provide to the Relay Store. It determines when a GC execution runs:
+
+```js
+// Sample scheduler function
+// Accepts a callback and schedules it to run at some future time.
+function gcScheduler(run: () => void) {
+  resolveImmediate(run);
+}
+
+const store = new Store(source, {gcScheduler});
+```
+
+- Without a `gcScheduler` option, Relay schedules garbage collection with the `resolveImmediate` function.
+- A scheduler function can make GC scheduling less aggressive than the default, for example based on time or [scheduler](https://github.com/facebook/react/tree/main/packages/scheduler) priorities. By convention, implementations do not execute the callback immediately.
 
 ### 4.4 The Release Buffer (`gcReleaseBufferSize`)
 
-When a retainer releases, the operation is held in a FIFO release buffer. If the user re-navigates to the same screen before the buffer evicts it, no refetch is needed — the data is still there.
+The Relay Store holds a release buffer. It keeps a configurable number of queries retained after their original owner releases them (by default when a component that renders the query unmounts). This makes it more likely that data is reusable when navigating back to a page, tab or piece of content that was visited before.
 
-```ts
-import { Environment, Network, RecordSource, Store } from 'relay-runtime';
+Set the size of the release buffer with the `gcReleaseBufferSize` option of the Relay Store:
 
-const store = new Store(new RecordSource(), {
-  gcReleaseBufferSize: 10, // default 10; 0 turns the release buffer off
-});
+```js
+const store = new Store(source, {gcReleaseBufferSize: 10});
 ```
 
-Tune based on navigation depth: SPAs with deep back/forward flows benefit from a larger buffer; memory-constrained contexts (mobile web) may want a smaller one.
+- A buffer size of 0 is equivalent to no release buffer. Queries are released and collected immediately.
+- By default, environments have a release buffer size of 10.
 
-### 4.5 GC Scheduler
+### 4.5 Query Cache Expiration (Age-Based Staleness)
 
-GC is triggered when records become orphaned. By default, Relay schedules it with `resolveImmediate`, so it runs right after the current task. Supply a custom scheduler to defer work to idle time:
+The query cache expiration time affects whether a query and its variables can be fulfilled with data already in the store. Set it with the `queryCacheExpirationTime` option of the Relay Store:
 
-```ts
-const store = new Store(new RecordSource(), {
-  gcScheduler: (run) => {
-    // e.g. requestIdleCallback, or delay until transitions settle
-    requestIdleCallback(run);
-  },
-});
+```js
+const store = new Store(source, {queryCacheExpirationTime: 5 * 60 * 1000 });
 ```
 
-Use this if GC causes noticeable jank during rapid navigation.
-
-### 4.6 Query Cache Expiration (Age-Based Staleness)
-
-`queryCacheExpirationTime` (milliseconds) marks any query older than that threshold as stale. Stale queries trigger a network request on the next `store-or-network` read, even when all records are present.
-
-```ts
-const store = new Store(new RecordSource(), {
-  queryCacheExpirationTime: 5 * 60 * 1000, // 5 minutes
-});
-```
-
-This is the primary age-based TTL knob. Pair with `store-or-network` for "fresh-for-N-minutes, then refetch on next view" behavior.
+Without a query cache expiration time, staleness checks look only at whether the referenced records have been invalidated.
 
 ---
 
 ## 5. Staleness & Invalidation
 
-Relay does not auto-expire records based on age (unless you configure `queryCacheExpirationTime`). Staleness is almost always explicit: something marks a record or the whole store stale, and the next read that intersects re-fetches.
+By default, Relay does not consider data in the store stale, however long it has been in the cache. Data is stale when it is marked stale with the data invalidation APIs or when it is older than the query cache expiration time.
+
+Marking data as stale is useful when you know that some data is not fresh, for example after executing a mutation. An updater function can be part of a mutation, a subscription or a local store update.
 
 ### 5.1 Global: `invalidateStore()`
 
-Inside an updater, invalidate every record at once. The next `store-or-network` evaluation of any query will issue a network request.
+The coarsest invalidation marks the whole store stale. Call `invalidateStore()` within an updater function:
 
-```ts
-import { commitLocalUpdate } from 'react-relay';
-
-commitLocalUpdate(environment, (store) => {
+```js
+function updater(store) {
   store.invalidateStore();
-});
-```
-
-Use after a session change (login/logout), a major mutation with broad side effects, or a "global refresh" action.
-
-### 5.2 Record-Level: `invalidateRecord()`
-
-Much more surgical — only queries that reference the invalidated record(s) are considered stale.
-
-```ts
-import { commitLocalUpdate } from 'react-relay';
-
-commitLocalUpdate(environment, (store) => {
-  const user = store.get(userId);
-  user?.invalidateRecord();
-});
-```
-
-### 5.3 Invalidating from Mutations
-
-Use the mutation's `updater`/`optimisticUpdater` to invalidate server-side side-effect targets:
-
-```tsx
-const [commit] = useMutation<DeletePostMutation>(DeletePostMutationNode);
-
-commit({
-  variables: { postId },
-  updater: (store) => {
-    store.get(postId)?.invalidateRecord();
-    store.get(authorId)?.invalidateRecord(); // author.postCount is now stale
-  },
-});
-```
-
-### 5.4 Reacting: `useSubscribeToInvalidationState`
-
-Invalidation alone only marks data stale — it does not trigger a refetch on *already-mounted* components. If the invalidated data is visible *right now*, subscribe and trigger a refetch:
-
-```tsx
-import {
-  useSubscribeToInvalidationState,
-  useRefetchableFragment,
-} from 'react-relay';
-
-function Profile({ userRef }: { userRef: Profile_user$key }) {
-  const [data, refetch] = useRefetchableFragment<
-    ProfileRefetchQuery,
-    Profile_user$key
-  >(ProfileFragmentNode, userRef);
-
-  useSubscribeToInvalidationState([data.id], () => {
-    refetch({}, { fetchPolicy: 'network-only' });
-  });
-
-  return <h1>{data.name}</h1>;
 }
 ```
 
-Without this subscription, the mounted component continues to display the stale data until it unmounts/remounts, at which point the next read sees the stale flag and refetches.
+`invalidateStore()` makes all data that was written to the store before the invalidation stale. Any query must be refetched the next time it is evaluated.
 
-The hook subscribes again whenever the id list or the callback identity changes. Wrap the callback in `useCallback` to keep one subscription. The hook returns a `Disposable`, and it disposes the subscription on unmount.
+### 5.2 Record-Level: `invalidateRecord()`
 
-Outside React, use the store methods that the hook calls:
+To invalidate specific records, call `invalidateRecord()` within an updater function. Only queries that reference the invalidated records are stale after the invalidation.
 
-```ts
-const store = environment.getStore();
-const state = store.lookupInvalidationState([userId]);
-const disposable = store.subscribeToInvalidationState(state, () => {
-  // refetch or update the view
-});
+```js
+function updater(store) {
+  const user = store.get('<id>');
+  if (user != null) {
+    user.invalidateRecord();
+  }
+}
 ```
 
-### 5.4.1 Stale Definition
+`invalidateRecord()` on the `user` record marks that user stale. Any cached query that references that user is stale and must be refetched the next time it is evaluated.
 
-A query is stale when it can be fulfilled from the store and one of these holds:
+### 5.3 Reacting: `useSubscribeToInvalidationState`
 
-- The time since the last fetch is greater than `queryCacheExpirationTime`.
-- The query references at least one invalidated record.
+Marking the store or records stale causes queries to be refetched the next time they are evaluated. Some cases need an immediate refetch:
 
-Without `queryCacheExpirationTime`, only invalidation marks a query stale.
+- Data that is already visible in the current page. No navigation occurs, so the queries for the current page are not re-evaluated, and the page shows stale data.
+- Data that is rendered on a previous view that was never unmounted. If you navigate back, the queries for that view are not re-evaluated, and the view shows stale data.
 
-### 5.5 How `useLazyLoadQuery` Handles Staleness
+For these cases, use the `useSubscribeToInvalidationState` hook:
 
-On each render, `useLazyLoadQuery` checks whether the query is present *and* non-stale:
+```js
+function ProfilePage(props) {
+  // Example of querying data for the current page for a given user
+  const data = usePreloadedQuery(
+    graphql`...`,
+    props.preloadedQuery,
+  )
 
-- Present + fresh → synchronous cache hit, no network request.
-- Present + stale (invalidated or past `queryCacheExpirationTime`) → `store-or-network` and `store-and-network` send a network request and suspend until the response arrives.
-- Missing → suspends, fetches.
+  // Here we subscribe to changes in invalidation state for the given user ID.
+  // Whenever the user with that ID is marked as stale, the provided callback will
+  // be executed
+  useSubscribeToInvalidationState([props.userID], () => {
+    // Here we can do things like:
+    // - re-evaluate the query by passing a new preloadedQuery to usePreloadedQuery.
+    // - imperatively refetch any data
+    // - render a loading spinner or gray out the page to indicate that refetch
+    //   is happening.
+  })
+
+  return (...);
+}
+```
+
+- `useSubscribeToInvalidationState` takes an array of ids and a callback. Whenever any record for those ids is marked stale, the callback fires.
+- In the callback, refetch or update the views that render stale data. For example, keep the `preloadedQuery` in state and set a new one in the callback to re-execute the top-level `usePreloadedQuery`. That query is stale, so it is refetched even if the data is cached in the store.
+
+### 5.4 Stale Definition
+
+A stale query is one that can be fulfilled with records from the store, and:
+
+- the time since it was last fetched is greater than the query cache expiration time, or
+- it contains at least one record that was invalidated.
+
+The staleness check occurs when a new request is made (for example in a call to `loadQuery`). Components that reference stale data continue to render that data. Additional requests that would be fulfilled with stale data go to the network.
 
 ---
 
 ## 6. Rendering Partially Cached Data
 
-Fragment spreads do *not* count against the outer query's presence check. This means the outer query can render synchronously from cache while a child fragment with missing fields suspends independently.
+*Partial rendering* is the ability to immediately render a query that is partially cached. The cached parts render without waiting for the full query.
 
-### 6.1 Example
+### 6.1 Fragments as Boundaries
 
-```tsx
-function HomeTab({ queryRef }: Props) {
-  const data = usePreloadedQuery<HomeTabQuery>(
-    graphql`
-      query HomeTabQuery($id: ID!) {
-        user(id: $id) {
-          name
-          ...UsernameComponent_user
-        }
-      }
-    `,
-    queryRef,
-  );
-  return (
-    <>
-      <h1>{data.user?.name}</h1>
-      <Suspense fallback={<Spinner label="Loading username" />}>
-        <UsernameComponent userRef={data.user} />
-      </Suspense>
-    </>
-  );
-}
+A fragment component suspends if any data it declared locally is missing during render and is being fetched. It suspends until its parent query is fetched. Relay considers data missing only if it is declared locally and missing. Data selected within fragment spreads does not affect whether the outer query or fragment has missing data.
 
-function UsernameComponent({ userRef }: { userRef: UsernameComponent_user$key }) {
+Take this fragment component:
+
+```js
+/**
+ * UsernameComponent.react.js
+ *
+ * Fragment Component
+ */
+
+import type {UsernameComponent_user$key} from 'UsernameComponent_user.graphql';
+
+const React = require('React');
+const {graphql, useFragment} = require('react-relay');
+
+type Props = {
+  user: UsernameComponent_user$key,
+};
+
+function UsernameComponent(props: Props) {
   const user = useFragment(
     graphql`
       fragment UsernameComponent_user on User {
         username
       }
     `,
-    userRef,
+    props.user,
   );
-  return <span>@{user.username}</span>;
+  return (...);
+}
+
+module.exports = UsernameComponent;
+```
+
+If only the `name` of the `User` with `{id: 4}` is cached, the query that includes this fragment renders, because `name` is available. `UsernameComponent` then suspends, because `username` is missing. A network request always starts if any piece of data for the full query, including fragments, is missing, regardless of the `fetchPolicy`.
+
+Without a `Suspense` component, the suspension bubbles up and suspends the entire app. Wrap `UsernameComponent` in `Suspense` so the other parts render:
+
+```js
+/**
+ * HomeTab.react.js
+ *
+ * Query Component
+ */
+
+const React = require('React');
+const {Suspense} = require('React');
+const {graphql, usePreloadedQuery} = require('react-relay');
+
+const UsernameComponent = require('./UsernameComponent.react');
+
+
+function HomeTab() {
+  const data = usePreloadedQuery(
+    graphql`
+      query AppQuery($id: ID!) {
+        user(id: $id) {
+          name
+          ...UsernameComponent_user
+        }
+      }
+    `,
+    props.queryRef,
+  );
+
+  return (
+    <>
+      <h1>{data.user?.name}</h1>
+
+      {/*
+        Wrap the UserComponent in Suspense to allow other parts of the
+        App to be rendered even if the username is missing.
+      */}
+      <Suspense fallback={<LoadingSpinner label="Fetching username" />}>
+        <UsernameComponent user={data.user} />
+      </Suspense>
+    </>
+  );
 }
 ```
 
-If `name` is cached but `username` is not, the header appears instantly; the username slot shows its own spinner and upgrades when the fragment's data arrives. Without the nested `<Suspense>`, the whole tree would suspend to the outer boundary.
-
-**Rule**: wherever a fragment may be rendered with partial data, wrap it in a local `<Suspense>` with a per-section fallback.
+The same process applies to nested fragments. If the data a fragment requires is cached, the fragment component renders, whether or not data for its child or descendant fragments is missing. Wrap a child fragment with missing data in `Suspense` so other fragments and parts of the app continue to render.
 
 ---
 
 ## 7. Filling In Missing Data: `missingFieldHandlers`
 
-Two queries can reference the same underlying record via different entry points:
+Relay reuses data that is cached for a query fetched before. When different queries point to the same data, Relay does not know that by default. Take these two queries:
 
-```graphql
-query A { user(id: 4) { name } }
-query B { node(id: 4) { ... on User { name } } }
+```js
+// Query 1
+
+query UserQuery {
+  user(id: 4) {
+    name
+  }
+}
 ```
 
-By default, Relay treats these as independent and won't recognize the overlap when query B runs after query A. `missingFieldHandlers` teach the runtime how to map one shape to another.
+```js
+// Query 2
 
-### 7.1 Configuration
+query NodeQuery {
+  node(id: 4) {
+    ... on User {
+      name
+    }
+  }
+}
+```
 
-```ts
-import { Environment, Network, RecordSource, Store, ROOT_TYPE } from 'relay-runtime';
+They reference the same data. To reuse the cached data of one query when rendering the other, provide `missingFieldHandlers` to the `RelayEnvironment`. They encode that a `node(id: 4)` "is the same as" `user(id: 4)`.
+
+```js
+const {ROOT_TYPE, Environment} = require('relay-runtime');
 
 const missingFieldHandlers = [
   {
-    kind: 'linked' as const,
-    handle(field, record, argValues) {
+    handle(field, record, argValues): ?string {
+      // Make sure to add a handler for the node field
       if (
-        record?.getType() === ROOT_TYPE &&
-        field.name === 'user' &&
-        argValues.hasOwnProperty('id')
-      ) {
-        return argValues.id; // map Query.user(id) -> node with that ID
-      }
-      if (
-        record?.getType() === ROOT_TYPE &&
+        record != null &&
+        record.getType() === ROOT_TYPE &&
         field.name === 'node' &&
         argValues.hasOwnProperty('id')
       ) {
+        return argValues.id
+      }
+      if (
+        record != null &&
+        record.getType() === ROOT_TYPE &&
+        field.name === 'user' &&
+        argValues.hasOwnProperty('id')
+      ) {
+        // If field is user(id: $id), look up the record by the value of $id
         return argValues.id;
       }
+      if (
+        record != null &&
+        record.getType() === ROOT_TYPE &&
+        field.name === 'story' &&
+        argValues.hasOwnProperty('story_id')
+      ) {
+        // If field is story(story_id: $story_id), look up the record by the
+        // value of $story_id.
+        return argValues.story_id;
+      }
+      return undefined;
     },
+    kind: 'linked',
   },
 ];
 
-const environment = new Environment({
-  network: Network.create(fetchFn),
-  store: new Store(new RecordSource()),
-  missingFieldHandlers,
-});
+const environment = new Environment({/*...*/, missingFieldHandlers});
 ```
 
-### 7.2 Handler Kinds
-
-- `'scalar'` — returns a scalar value (number, string, boolean).
-- `'linked'` — returns a `dataID` referencing another record in the store.
-- `'pluralLinked'` — returns an array of `dataID`s.
-
-During cache evaluation, when Relay encounters a missing field, it runs matching handlers before declaring the query incomplete. A handler that returns `undefined` is a no-op; a handler that returns a valid ID/value satisfies the miss and the query can be served from cache.
-
-Common handlers to add: `node(id:)` → `id`, `user(id:)` → `id`, `viewer()` → a well-known viewer record ID.
-
-### 7.3 Handler Signature and Plural Example
-
-Every handler has the signature `handle(field, parentRecord, args, store)`. The fourth argument is a read-only record source proxy. A `pluralLinked` handler returns an array of record IDs:
-
-```ts
-const missingFieldHandlers = [
-  {
-    kind: 'pluralLinked' as const,
-    handle(field, record, args) {
-      if (record?.getType() === ROOT_TYPE && field.name === 'nodes' && Array.isArray(args.ids)) {
-        return args.ids; // Query.nodes(ids) -> records with those IDs
-      }
-    },
-  },
-  {
-    kind: 'scalar' as const,
-    handle(field, record) {
-      if (field.name === 'displayName' && record?.getType() === 'User') {
-        return record.getValue('name'); // derive a missing scalar from a cached one
-      }
-    },
-  },
-];
-```
-
-Relay runs a matching handler each time it finds a missing field while it checks the cache for a query (`environment.check`). A handler that returns `undefined` leaves the field missing.
+- `missingFieldHandlers` is an array of handlers. Each handler specifies a `handle` function and the kind of missing fields it handles:
+  - `'scalar'`: a field that contains a scalar value, for example a number or a string.
+  - `'linked'`: a field that references another object, not a scalar.
+- The `handle` function takes the missing field, the record that field belongs to, and the arguments passed to the field in the current execution of the query.
+  - For a `'scalar'` field, `handle` returns a scalar value to use as the value of the missing field.
+  - For a `'linked'` field, `handle` returns an ID that references another object in the store to use in place of the missing field.
+- When Relay fulfills a query from the local cache and detects missing data, it runs the matching missing field handlers before it declares the data missing.
 
 ---
 
-## 8. Connections & Pagination
+## 8. Updating Connections
 
-Relay stores connections as `Record` nodes keyed by the parent + `@connection` key + filter args. Pagination appends edges into that record. For caching purposes:
+To add an edge to a connection after a mutation, create the edge with `ConnectionHandler.createEdge`:
 
-- A paginated connection is cached per unique `(parentId, connectionKey, filters)` tuple.
-- Navigating away and back hits the cache if the same filters are in play.
-- Cursor state lives inside the connection record (`pageInfo`), so resuming `loadNext()` just works.
+```js
+const {ConnectionHandler} = require('relay-runtime');
 
-Cache-aware pagination pattern:
-
-```tsx
-function Feed({ userRef }: Props) {
-  const { data, loadNext, hasNext, isLoadingNext } = usePaginationFragment(
-    graphql`
-      fragment Feed_user on User
-      @argumentDefinitions(count: { type: "Int", defaultValue: 10 },
-                           cursor: { type: "String" })
-      @refetchable(queryName: "FeedPaginationQuery") {
-        posts(first: $count, after: $cursor)
-          @connection(key: "Feed_posts") {
-          edges { node { id ...PostRow_post } }
-        }
-      }
-    `,
-    userRef,
+function updater(store: RecordSourceSelectorProxy) {
+  const storyRecord = store.get(storyID);
+  const connectionRecord = ConnectionHandler.getConnection(
+    storyRecord,
+    'StoryComponent_story_comments_connection',
   );
+
+  // Create a new local Comment record
+  const id = `client:new_comment:${randomID()}`;
+  const newCommentRecord = store.create(id, 'Comment');
+
+  // Create new edge
+  const newEdge = ConnectionHandler.createEdge(
+    store,
+    connectionRecord,
+    newCommentRecord,
+    'CommentEdge', /* GraphQl Type for edge */
+  );
+
   // ...
 }
 ```
 
-Invalidate a connection after a mutation that adds/removes edges:
+Add the new edge to the connection with `ConnectionHandler.insertEdgeAfter` or `ConnectionHandler.insertEdgeBefore`:
 
-```ts
-updater: (store) => {
-  const user = store.get(userId);
-  const conn = user && ConnectionHandler.getConnection(user, 'Feed_posts');
-  if (conn) {
-    const edge = ConnectionHandler.createEdge(store, conn, newPost, 'PostEdge');
-    ConnectionHandler.insertEdgeBefore(conn, edge);
-  }
-},
+```js
+const {ConnectionHandler} = require('relay-runtime');
+
+function updater(store: RecordSourceSelectorProxy) {
+  const storyRecord = store.get(storyID);
+  const connectionRecord = ConnectionHandler.getConnection(
+    storyRecord,
+    'StoryComponent_story_comments_connection',
+  );
+
+  const newEdge = (...);
+
+  // Add edge to the end of the connection
+  ConnectionHandler.insertEdgeAfter(
+    connectionRecord,
+    newEdge,
+  );
+
+  // Add edge to the beginning of the connection
+  ConnectionHandler.insertEdgeBefore(
+    connectionRecord,
+    newEdge,
+  );
+}
 ```
 
-For cursor-based caches, prefer explicit edge insertion over `invalidateRecord` — the latter forces a full refetch that resets pagination state.
+See [updating-data.md](./updating-data.md) for more on connection updaters.
 
 ---
 
-## 9. Record TTL / Age-Based Strategies
+## 9. Troubleshooting
 
-Relay has no built-in per-record TTL, but there are three idiomatic patterns:
-
-### 9.1 Global TTL via `queryCacheExpirationTime`
-
-Simple. Every query older than N ms is stale. Pair with `store-or-network`.
-
-```ts
-new Store(source, { queryCacheExpirationTime: 5 * 60 * 1000 });
-```
-
-### 9.2 Timer-Driven Invalidation
-
-For specific records with known lifetimes (e.g. auth tokens, feature flags), schedule explicit invalidation:
-
-```ts
-setInterval(() => {
-  commitLocalUpdate(environment, (store) => {
-    store.get(featureFlagsId)?.invalidateRecord();
-  });
-}, 60 * 1000);
-```
-
-### 9.3 Event-Driven Invalidation
-
-Invalidate from websocket/subscription messages that signal upstream change:
-
-```ts
-subscription.on('post:updated', ({ id }) => {
-  commitLocalUpdate(environment, (store) => {
-    store.get(id)?.invalidateRecord();
-  });
-});
-```
-
-Mounted readers of that record should use `useSubscribeToInvalidationState` to refetch proactively (§5.4).
-
----
-
-## 10. Debugging the Cache
-
-- **Relay DevTools** (browser extension): inspect the `RecordSource`, list retained operations, see invalidation state per record.
-- **`environment.getStore().getSource().toJSON()`** dumps the full normalized record map — useful in tests or ad-hoc assertions.
-- **`environment.check(operationDescriptor)`** returns `{status: 'available', fetchTime}`, `{status: 'missing'}` or `{status: 'stale'}` for a given query without triggering a fetch. Handy for writing custom routing pre-checks.
-
----
-
-## 11. Fetch Policy Decision Table
-
-| Scenario | Recommended policy | Why |
+| Symptom | Cause | Fix |
 |---|---|---|
-| Default page navigation | `store-or-network` | Instant if cached, fetch if not |
-| Feed/dashboard with SWR desired | `store-and-network` | Show something immediately, revalidate |
-| "Pull to refresh" / manual refresh button | `network-only` | User explicitly asked for fresh |
-| Post-mutation confirmation screen | `network-only` | Avoid stale optimistic state |
-| Route prefetched via `useQueryLoader` | `store-or-network` | Loader warms cache; consumer reuses |
-| Client-only field read (client schema extension) | `store-only` | No server source of truth |
-| Optimistic-only UI slice | `store-only` | Data is synthesized locally |
-| Detail view opened from a list (both queries overlap) | `store-or-network` + `missingFieldHandlers` | Maximize cache hit via `node(id:)` mapping |
-| Data known to expire on a schedule | `store-or-network` + `queryCacheExpirationTime` | Age-based auto-refetch |
-| Stale-after-mutation, may or may not be visible | `invalidateRecord()` in updater | Next read refetches; visible views use `useSubscribeToInvalidationState` |
-
----
-
-## 12. Troubleshooting
-
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| Query refetches every render | No Suspense boundary, or component re-mounting | Wrap in stable `<Suspense>`; stabilize parent keys |
-| Data gone after brief unmount/remount | Release buffer too small; GC ran | Increase `gcReleaseBufferSize`; consider `useQueryLoader` to hold retention |
-| "Missing data" error despite recent fetch | Different query shape; no missing-field handler | Add `missingFieldHandlers` for `node`/`user`/`viewer` mappings |
-| Stale data still visible after mutation | Invalidated but component already mounted | Add `useSubscribeToInvalidationState` and call `refetch` |
-| Cache never clears on logout | No retainer, but records linger in release buffer | Call `store.invalidateStore()` inside `commitLocalUpdate`, or swap to a fresh `Environment` |
-| `store-or-network` won't refetch fresh server data | Query is present and fresh per Relay | Use `store-and-network` or set `queryCacheExpirationTime` |
-| `store-only` returns partial data and suspends forever | Required fields genuinely missing | Ensure prefetch wrote all selected fields; or switch to `store-or-network` |
-| Fragment at leaf suspends the whole screen | Missing local `<Suspense>` boundary | Wrap the partially-cached fragment in its own `<Suspense>` |
-| GC causes jank during rapid navigation | Default scheduler (`resolveImmediate`) runs GC right after each release | Provide `gcScheduler: requestIdleCallback` |
-| Pagination resets unexpectedly | `invalidateRecord` on a connection parent | Use explicit `ConnectionHandler` edge insertion instead |
-| `useLazyLoadQuery` unretains too eagerly with StrictMode double-invoke | Mount/unmount/mount race outpaces release buffer | Prefer `useQueryLoader` + `usePreloadedQuery`; or increase `gcReleaseBufferSize` |
-| Mounted list doesn't reflect a new record written via updater | Connection not updated | Insert edge via `ConnectionHandler.insertEdgeBefore/After` in the mutation updater |
+| Data gone after brief unmount/remount | Release buffer too small; GC ran | Increase `gcReleaseBufferSize` |
+| Two queries for the same record do not share cached data | Relay does not know that the two root fields reference the same record | Add `missingFieldHandlers` for the `node`/`user` mappings |
+| Stale data still visible after mutation | Invalidated but component already mounted | Add `useSubscribeToInvalidationState` and refetch in the callback |
+| `store-or-network` won't refetch fresh server data | Query is present and not stale | Use `store-and-network` or set `queryCacheExpirationTime` |
+| Fragment at leaf suspends the whole screen | Missing local `<Suspense>` boundary | Wrap the partially cached fragment in its own `<Suspense>` |
 | `environment.check(query) === 'stale'` is never true | `check` returns an object | Compare `environment.check(query).status` |
-| A cached query suspends after `invalidateRecord` | A stale query renders only after the response arrives | Wrap in `<Suspense>`; keep the mounted view and refetch it with `useSubscribeToInvalidationState` |
-| Invalidation callback fires more than once or re-subscribes every render | Callback identity changes on each render | Wrap the callback in `useCallback` |
 
 ---
 
-## 13. Summary
+## 10. Summary
 
-- Default to `store-or-network`. Upgrade to `store-and-network` for SWR, `network-only` for forced freshness, `store-only` for local/prefetched data.
-- Hooks (`useLazyLoadQuery`, `useQueryLoader`/`usePreloadedQuery`) retain queries automatically while mounted; the release buffer smooths navigation.
-- Tune lifecycle via `gcReleaseBufferSize`, `gcScheduler`, and `queryCacheExpirationTime` on the `Store`.
-- Mark data stale with `invalidateStore()` / `invalidateRecord()` inside `commitLocalUpdate` or mutation updaters. Use `useSubscribeToInvalidationState` to refetch visible stale data.
-- Wrap every partially-cacheable fragment in its own `<Suspense>` to unlock partial rendering.
-- Teach Relay about equivalent query shapes with `missingFieldHandlers` to maximize cache hits.
+- Default to `store-or-network`. Use `store-and-network` to always send a request, `network-only` to ignore the cache, and `store-only` for local data.
+- Query components retain queries while mounted; the release buffer smooths navigation.
+- Tune the lifecycle with `gcReleaseBufferSize`, `gcScheduler` and `queryCacheExpirationTime` on the `Store`.
+- Mark data stale with `invalidateStore()` / `invalidateRecord()` inside an updater. Use `useSubscribeToInvalidationState` to refetch visible stale data.
+- Wrap a fragment that can render with partial data in its own `<Suspense>`.
+- Use `missingFieldHandlers` to teach Relay that different query shapes reference the same data.
