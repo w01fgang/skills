@@ -62,7 +62,7 @@ export function greeting(user: UserModel): string {
 }
 ```
 
-Here `User` is a client type, and the first argument is the model instance that its `@relayType` resolver returns. A field on a server type has no model: it reads its data through `@rootFragment` (see [Derived Fields](#derived-fields)). Relay memoizes automatically — no `useMemo` needed.
+For a field on a client type, the first argument is the model instance that the `@relayType` resolver returns. For a field on a server type, the resolver reads its data through `@rootFragment` (see [Derived Fields](#derived-fields)). Relay memoizes automatically — no `useMemo` needed.
 
 Consume it like any field:
 

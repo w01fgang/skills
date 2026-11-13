@@ -660,14 +660,14 @@ compiler requires `@waterfall` on each read of such a field.
 
 ```ts
 /**
- * @relayField Post.author: User
+ * @relayField Post.author: ServerUser
  */
 export function author(post: PostModel): DataID {
   return post.authorId;
 }
 ```
 
-`User` is a server type that implements `Node`. The resolver returns its ID.
+`ServerUser` is a server type that implements `Node`. The resolver returns its ID.
 
 ```graphql
 fragment PostByline_post on Post {
