@@ -135,6 +135,24 @@ const UserProfile: EntryPointComponent<Queries, {}, RuntimeProps> = ({
 export default UserProfile;
 ```
 
+### Query entries in `getPreloadProps`
+
+Each key under `queries` describes 1 preloaded query.
+
+| Field | Behavior |
+|---|---|
+| `parameters` | The generated query module (`*.graphql`). |
+| `variables` | Variables for the query. |
+| `options.fetchPolicy` | `store-or-network`, `store-and-network` or `network-only`. |
+| `options.networkCacheConfig` | Cache config for the network layer. |
+| `options.includeIf` | `false` skips the query. The `queries` prop then has no entry for that key. |
+| `environmentProviderOptions` | Passed to `environmentProvider.getEnvironment(...)` for this query. |
+
+`loadEntryPoint` passes only `fetchPolicy` and `networkCacheConfig` on to
+`loadQuery`. The other `PreloadOptions` fields (`fetchKey`,
+`prefetchExpiryInHours`, and on v21 `enableForOfflineCacheJob`) have no effect
+there. A `null` entry under `queries` or `entryPoints` is skipped.
+
 ## Nested EntryPoints
 
 `getPreloadProps` can also return `entryPoints`. Each nested entrypoint is loaded in parallel with the parent's queries, and arrives in the component as a `PreloadedEntryPoint` ready to be rendered with `<EntryPointContainer>`.
@@ -239,7 +257,7 @@ const [entryPointRef, loadEntryPoint, disposeEntryPoint] =
   useEntryPointLoader(environmentProvider, DashboardEntryPoint);
 ```
 
-- **`environmentProvider`** — `{getEnvironment(): Environment}`. Usually a stable module-level object.
+- **`environmentProvider`** — `{getEnvironment(): Environment}`. Usually a stable module-level object. `getEnvironment` receives the `environmentProviderOptions` of each query entry as its argument.
 - **`entryPointRef`** — `PreloadedEntryPoint | null`. Pass to `EntryPointContainer`.
 - **`loadEntryPoint(params)`** — begins loading code + data. Disposes any prior ref automatically.
 - **`disposeEntryPoint()`** — releases retained query data. Do not call during render.
@@ -274,7 +292,9 @@ function ProfileLauncher({userId}: {userId: string}) {
 ```
 
 Notes:
-- Call `loadEntryPoint` from an event handler or an effect. The docs state that it can throw during React's render phase.
+- Call `loadEntryPoint` from an event handler or an effect. The docs state that it can throw during React's render phase. The v20.1.1 and v21.0.1 source of `loadEntryPoint.js` has no render-phase check, so a call in render creates a new undisposed ref on every render.
+- The hook calls the loader and the disposer only while the component is mounted. After unmount both calls do nothing.
+- When React hides and shows the component again (Offscreen or Activity) or Fast Refresh remounts it, the hook reloads the entry point with the last params.
 - Data is written to the store when both AST and query response are available and stays retained until disposal.
 
 ## `loadEntryPoint` imperative
@@ -299,6 +319,10 @@ ref.dispose();
 
 The returned ref has `.dispose()` which releases retained store data. Until disposed, the data remains and will not be garbage collected.
 
+- `loadEntryPoint` starts the download of the `root` module at once, then calls `getPreloadProps` and starts every query and every nested entry point.
+- `dispose()` releases the queries of the entry point and of all nested entry points, and cancels requests that are in flight. A second call does nothing.
+- The docs state that only `dispose` is a stable property of the ref. Pass the ref to `EntryPointContainer`.
+
 ## `<EntryPointContainer />`
 
 Renders a preloaded EntryPoint.
@@ -315,6 +339,9 @@ Props:
 - **`props`** — runtime props forwarded to the component's `props` argument (typed as `TRuntimeProps`).
 
 The container suspends until both the code chunk and query data are ready, so wrap it in `<Suspense>`.
+
+- The container itself suspends until the `root` module loads. It renders the component with the `queries`, `entryPoints`, `extraProps` and `props` values. The query data suspends inside the component, in its `usePreloadedQuery` calls.
+- The container logs a dev warning when `entryPointReference` is disposed. The warning states that it becomes a hard error in a future release.
 
 ## Router integration
 

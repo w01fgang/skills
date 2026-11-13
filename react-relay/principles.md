@@ -39,6 +39,17 @@ Each component owns the GraphQL fragment that describes what it needs to render.
 
 Developers describe what data is needed, not how or when to fetch it. The framework decides the network, cache, and consistency mechanics.
 
+### 1.6 Response caches and consistency
+
+Source: v21 docs `principles-and-architecture/thinking-in-graphql` (same text in v20.1.0).
+
+- A response cache keyed by URI or by query text fails when queries overlap. A `stories` query can show `likeCount: 1` while a later `story(id: "123")` query shows `likeCount: 2`. The 2 cached responses disagree.
+- Relay normalizes each response into records. The cache maps IDs to records. A record maps field names to values. A link to another record stores that record's ID. Each entity exists once, however a query fetched it.
+- A field's storage key includes its arguments. `photo(size: 32)` and `photo(size: 64)` are 2 fields. Pagination needs merge logic: `stories(first: 10, offset: 10)` appends to the cached list. For this reason the cache processes the payload and the query together.
+- Reading the cache walks the query like a GraphQL executor, over fixed data and without async results. Relay also runs a diff traversal that finds the missing fields. The diff shrinks the request, or removes it when the cache holds everything.
+- Relay keeps a map from each view to the IDs the view read. A write notifies only the views whose IDs changed. Immutable records alone cannot do this: a change to the author record (`2`) leaves the story record (`1`) unchanged, though the story view shows the author.
+- A mutation selects the fields that may change. The server cannot report all changes itself: the schema differs from the storage layout, and privacy rules decide what the viewer sees (for example `age`).
+
 ## 2. Thinking in Relay
 
 Relay takes GraphQL's structural advantages and enforces them with a component contract.
@@ -65,6 +76,8 @@ Consequences:
 - Components cannot form hidden dependencies on sibling or parent data
 - Refactoring one component's fragment cannot silently break another
 - Removing a component cleanly removes its fields from the generated query
+
+Fragment references enforce the contract. A fragment cannot be fetched on its own. A component gets a fragment reference by spreading its fragment into a parent fragment or a query, and every fragment ends up spread into a query. Relay checks the reference: when `<Story>` renders `<AuthorDetails>` without spreading its fragment, Relay warns, even when another component fetched the same fields. The code works today and breaks when that other component changes. All fields are nullable by default, so `data.story.author` can be `null`.
 
 ### 2.3 Render-as-you-fetch (hooks)
 
@@ -114,6 +127,17 @@ friends(first: $count, after: $cursor) @connection(key: "User_friends") {
 
 A parent may not read fields from a child's fragment without spreading it. A child may not read fields outside its own fragment. This symmetry keeps data ownership local and refactor-safe.
 
+### 2.7 One request for a view hierarchy
+
+Source: v21 docs `principles-and-architecture/thinking-in-relay` (same text in v20.1.0).
+
+Most products want one behavior: fetch all data for a view hierarchy, show a loading indicator, then render the whole view. Two simple designs fail:
+
+- A root component declares and fetches the data of all children. Every change to a child forces a change to every root that can render it.
+- Each component fetches its own data. A component can render different children depending on its data, so a child cannot start its fetch until the parent's fetch ends. The fetches run in stages, with one slow round trip per level.
+
+Relay lets each component declare its data and merges the declarations into one query at build time. The Relay compiler finds the requirements of the whole subtree statically, before the app runs. The runtime sends 1 network request for the entire view.
+
 ## 3. Architecture Overview
 
 Relay has three core parts: the Relay Compiler, the Relay Runtime, and React/Relay (the hooks). The network layer is a component of the runtime. The data flow:
@@ -141,6 +165,15 @@ At runtime, the tagged `graphql` template is a no-op marker; the real payload is
 ### 3.2 Store model
 
 The store is a normalized graph of Records. A Record is `{ id, __typename, ...fields }`. References between records are stored by id, not by inlined objects. Reading a fragment walks the graph starting from a root id, following links.
+
+### 3.3 Module roles and loose coupling
+
+Source: v21 docs `principles-and-architecture/architecture-overview` (same text in v20.1.0).
+
+- The compiler is a GraphQL-to-GraphQL optimizing compiler. It transforms and optimizes queries and generates build artifacts. Custom directives are translated into standard, spec-compliant GraphQL at compile time, which makes experiments with new GraphQL features easy.
+- The runtime is a high-performance GraphQL runtime for building higher-level client APIs. It provides a normalized object cache, optimized read and write operations, a generic hook for incremental field data (used by pagination), garbage collection of unreferenced entries, optimistic mutations with arbitrary logic, and primitives for subscriptions, live queries, and persisted caches.
+- React/Relay is the product API. It connects the runtime to React (`useFragment` and the other hooks).
+- The modules are loosely coupled. The compiler emits queries in a defined format that the runtime consumes, so the compiler is replaceable. React/Relay uses only the public runtime interface, so the runtime is replaceable and other view libraries can build on it.
 
 ## 4. Compiler Architecture
 
@@ -201,6 +234,23 @@ For each fragment and operation, the compiler emits type definitions:
 - `$variables` / `Response` — types for operation inputs and outputs
 
 Type safety follows from the generated types; there is no runtime type checking.
+
+### 4.7 Data flow and transform examples
+
+Source: v21 docs `principles-and-architecture/compiler-architecture` (same text in v20.1.0).
+
+The compiler extracts GraphQL text from source files and parses it with the schema into IR. The IR documents form a `CompilerContext`. Transforms rewrite the context. Then the compiler prints GraphQL (to files, or to a persisted-query store) with the `Printer` and generates artifacts with codegen. The IR encodes more GraphQL semantics than a `graphql-js` AST: `@include` and `@skip` are nodes, so a transform can merge sibling fields that share a condition and cut the number of conditionals the runtime evaluates. The `RelayCompiler` module is a helper that combines these parts for the Relay runtime. Each transform makes one kind of change; an app configures several.
+
+`FlattenTransform` inlines an anonymous fragment whose type matches the parent type:
+
+```graphql
+# before: id is processed twice
+foo { id ... on FooType { id } }
+# after: id is processed once
+foo { id }
+```
+
+`SkipRedundantNodeTransform` extends flattening to harder duplicates: a field that the query fetches both unconditionally and conditionally, or through 2 different sub-fragments. The result processes each field at most once.
 
 ## 5. Runtime Architecture
 
@@ -280,6 +330,9 @@ Merge semantics:
 - New Records are added
 - Existing Records have fields merged field-by-field
 - Records that are null in the published source are deleted in the store (for explicit server deletions)
+- Records with a special sentinel value are removed from the store (this un-publishes optimistically created records)
+
+`publish()` does not call subscribers. `notify()` does. The split lets several payloads publish before one round of downstream work, such as rendering. `notify()` checks each subscription in 3 steps: (1) skip it when the changed record IDs do not overlap the IDs in its last `Snapshot`; (2) re-read it and skip it when the new result equals the old one; (3) call its callback. The `Store` API details are in `runtime.md`.
 
 ### 5.5 Garbage collection
 
@@ -292,6 +345,17 @@ A mutation can attach an optimistic response or an optimistic updater. The Store
 ### 5.7 Observables and suspense
 
 Queries return Relay Observables (similar to RxJS). Hooks wire those into React Suspense: when a fragment's data is incomplete and a fetch is in flight, the hook throws the pending promise, letting Suspense boundaries show fallbacks. Once the fetch resolves and the store publishes, the component resumes.
+
+### 5.8 Selector, Snapshot, and Record access
+
+Source: v21 docs `principles-and-architecture/runtime-architecture` (same text in v20.1.0).
+
+- A `Selector` is a starting point for a graph traversal: a fragment, its variables, and the data ID of the root object. It selects a part of the object graph.
+- A `Snapshot` is the immutable result of a selector at one point in time. It holds the selector, the data, and the list of data IDs that the read touched.
+- `subscribe()` takes a `Snapshot`, not a `Selector`. With a selector alone, the store would have to re-read the data to learn which IDs to watch.
+- Code reaches `Record` objects only through the `RelayModernRecord` module. Do not assume a record is a plain object; the representation can change in one place.
+- `RecordSource` serves two roles: the store's record cache, and a patch that the runtime publishes to the store. The only implementation is the in-memory source; the interface also defines async record loading for future offline use.
+- A client ID derives from the path to the record from the nearest parent that has an `id`, for example `client:842472:address` for the `address` field of record `842472`.
 
 ## 6. Why Relay vs Apollo/urql
 

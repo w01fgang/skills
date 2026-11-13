@@ -20,6 +20,15 @@ npx relay-compiler codemod --project=web mark-dangerous-conditional-fragment-spr
 
 Codemods read your `relay.config.json` (or `relay.config.js`) and rewrite `.graphql` tagged literals in-place across the `src` paths declared there. Commit before running — these transforms edit files directly.
 
+Options (`relay-bin/src/main.rs`, v21):
+
+| Option | Meaning |
+|---|---|
+| `-p`, `--project <name>` | Run for 1 project. Repeat the option for several projects. Without it, all projects run. |
+| `[CONFIG]` | Optional config file path. Without it, the compiler searches `package.json` (`relay` key) and `relay.config.json` upward from the working directory. |
+
+On v20, only `mark-dangerous-conditional-fragment-spreads` and `remove-unnecessary-required-directives` exist (v20 `AvailableCodemod`). The v20 docs `--help` output lists only the first one.
+
 ### `mark-dangerous-conditional-fragment-spreads` (v19+)
 
 Adds `@dangerously_unaliased_fixme` to every fragment spread that is only conditionally fetched (guarded by `@skip`/`@include`, or matching an abstract type where the runtime type might not implement the fragment's type condition). Use this when upgrading to v19, which enforces `@alias` on such spreads.
@@ -39,6 +48,8 @@ Progressive rollout is supported via the `--rollout-percentage` parameter (short
 ```
 
 Run the codemod with the same percentage (`-r 20`). Raise both numbers in steps, then set the flag to `{ "kind": "enabled" }` and migrate the `_fixme` sites to real `@alias` annotations over time.
+
+The `-r` value is an integer from 0 to 100, or a range `start-end` such as `-r 20-30` (`start` must not exceed `end`). A range codemods only the fragments between the 2 percentages. Both v20 and v21 define `--rollout-percentage` / `-r` in `relay-codemod/src/codemod.rs`. The v20 docs page spells the option `--rollout`; the source wins.
 
 ### `remove-unnecessary-required-directives`
 
@@ -197,7 +208,7 @@ For GraphQL-literal rewrites, parse the template body yourself (`graphql` packag
 | Codemod | Version | Run when |
 |---|---|---|
 | `mark-dangerous-conditional-fragment-spreads` | v19+ | Upgrading to v19; before enabling `enforce_fragment_alias_where_ambiguous`. |
-| `remove-unnecessary-required-directives` | v16+ | After adopting `@throwOnFieldError` / `@catch`. |
+| `remove-unnecessary-required-directives` | v19+ | After adopting `@throwOnFieldError` / `@catch`. |
 | `fix-all` | v21+ | After each Relay version upgrade; migrates resolver docblocks to `@relayType` / `@relayField`. |
 | `relay-codemod` (archived jscodeshift) | pre-hooks | Only if still on `createFragmentContainer` / classic Relay; prefer manual rewrite. |
 | Custom jscodeshift transform | any | Project-specific renames, import rewrites, bespoke cleanups. |

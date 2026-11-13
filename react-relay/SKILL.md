@@ -28,6 +28,7 @@ Read the `react-relay` and `relay-compiler` versions in `package.json`. This ski
 | `@live_query` | Present | Removed. Use `@client_polling(interval:)` or `@live`. |
 | `@oneOf` input types | Object type with all-optional fields | Union type that permits 1 property; `"oneOfType": "ignore"` restores the object type |
 | `react-relay/rsc_EXPERIMENTAL` | Absent | Present, experimental |
+| `usePreloadedQuery` with a null ref | Throws (the hook destructures the ref) | Returns `null` at runtime (Flow). The TypeScript type stays non-null. |
 
 The resolver examples in [resolvers.md](./resolvers.md) and [directives.md](./directives.md) use the v21 tags. On v20, write `@RelayResolver` in place of `@relayType` and `@relayField`; the rest of each docblock is the same.
 

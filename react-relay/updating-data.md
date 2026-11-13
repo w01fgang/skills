@@ -14,7 +14,9 @@ Reference for mutating Relay's normalized store: mutations, subscriptions, local
 8. [commitLocalUpdate](#commitlocalupdate)
 9. [useSubscription](#usesubscription)
 10. [commitPayload](#commitpayload)
-11. [Troubleshooting](#troubleshooting)
+11. [Typesafe Updaters](#typesafe-updaters)
+12. [Client-Only Data](#client-only-data)
+13. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -55,6 +57,37 @@ Returns a tuple: the commit callback and an in-flight boolean. The config object
 | `onCompleted(response, errors)` | Success callback |
 | `onError(error)` | Failure callback |
 | `uploadables` | `{ [name]: File }` for multipart file uploads |
+| `onNext` | Called for each payload of a multi-payload response |
+| `onUnsubscribe` | Called when the returned `Disposable` is disposed |
+| `configs` | Legacy declarative configs (`RANGE_ADD`, `RANGE_DELETE`, `NODE_DELETE`). Use the declarative directives. |
+
+### Callback and updater arguments
+
+`commit()` returns a `Disposable`. `dispose()` reverts the optimistic update and suppresses the callbacks. It does not cancel the network request. After the mutation succeeds, `dispose()` does not revert the store.
+
+`isInFlight` is `true` while any mutation committed through the hook is in flight.
+
+| Function | Arguments |
+|---|---|
+| `updater` | `(store: RecordSourceSelectorProxy, data?: TMutation['response'] \| null)` |
+| `optimisticUpdater` | Same signature. `data` is read from `optimisticResponse`, and is `undefined` without one. |
+| `onCompleted` | `(response, errors)` |
+
+- `data` holds the fields that the mutation selects directly. Fields that only a spread fragment selects are absent. `data` is read from the response payload only.
+- `commitLocalUpdate` updaters take 1 parameter. No network payload exists.
+- `onCompleted` receives the mutation selection read from the store after the updaters and the declarative directives run. Fragment spreads stay masked. A record that `@deleteRecord` removed reads as `null`. `errors` is `null` when the response has no errors.
+- Relay can run `updater` and `optimisticUpdater` more than once, for example when it rebases optimistic updates. Put side effects in `onCompleted`, which runs once.
+
+```tsx
+commit({
+  variables,
+  updater: (store, data) => {
+    const comment = data?.addComment?.comment;
+    if (comment == null) return;
+    store.get(storyID)?.setValue(true, 'hasNewComment');
+  },
+});
+```
 
 ### Basic mutation
 
@@ -227,10 +260,17 @@ commit({
 3. Apply optimistic declarative directives (`@appendEdge`, ...).
 4. Server resolves.
 5. Roll back all optimistic changes.
-6. Apply real response, run `updater`, apply real directives.
+6. Apply real response, apply real directives, run `updater`.
 7. Fire `onCompleted` (or `onError` + skip step 6 on failure).
 
 Stacking multiple in-flight optimistic responses on the same fields can cause UI flicker; prefer a single source of truth per record.
+
+Rollback rules:
+
+- Relay reverts every optimistic change of a mutation when the response or the error arrives.
+- If another write changes the store while the mutation is in flight, Relay reverts the optimistic update, applies the write, and re-applies the optimistic update.
+- Relay does not recalculate a second optimistic value after the first one rolls back. With 2 optimistic responses that each add 1 to a like count, the first rollback leaves the count at +2. Use `optimisticUpdater` to compute the value from the store.
+- In the v21 source (`RelayPublishQueue._publishSourceFromPayload`), the handlers behind the declarative directives (`@appendEdge`, `@deleteEdge`, ...) run before the real `updater`. Do not rely on `updater` seeing the store before the directives apply.
 
 ---
 
@@ -253,6 +293,14 @@ const data = useFragment(graphql`
 `, storyRef);
 
 const connectionID = data.comments.__id;
+```
+
+`store.get(connectionID)` returns the connection record inside an updater:
+
+```ts
+function updater(store: RecordSourceSelectorProxy) {
+  const connection = store.get(connectionID);
+}
 ```
 
 **2. `ConnectionHandler.getConnectionID(parentID, key, filters?)`**:
@@ -397,7 +445,7 @@ mutation RemoveCommentsMutation($input: RemoveCommentsInput!, $connections: [ID!
 
 ### @deleteRecord
 
-Applied to a scalar `ID` field; evicts that record from the store entirely (and therefore from every connection referencing it).
+Applied to a scalar `ID` field; deletes that record from the store. An edge that still points to the deleted record reads `undefined`. Add `@deleteEdge` to remove the edge from a connection.
 
 ```graphql
 mutation DeletePostMutation($input: DeletePostInput!) {
@@ -406,6 +454,13 @@ mutation DeletePostMutation($input: DeletePostInput!) {
   }
 }
 ```
+
+### Directive behavior
+
+- `@appendEdge`, `@prependEdge`, `@appendNode` and `@prependNode` do not insert a node that the connection already contains. The connection does not change and subscribers receive no notification (v21 test `RelayModernEnvironment-ExecuteMutationWithDeclarativeMutation-test.js`; the same test exists on v20).
+- `@appendNode` and `@prependNode` log the warning `MutationHandlers: Expected target node to exist.` when the server returns `null` for the node.
+- The directives also work on query fields.
+- Relay applies the directives to the `optimisticResponse` first, then to the server response. On error, it rolls back both.
 
 ### Before / after
 
@@ -502,7 +557,7 @@ record.setValue('Hi', 'title', { locale: 'en' });
 
 ## commitLocalUpdate
 
-Pure client-side store edits — no network. The updater receives a `RecordSourceSelectorProxy`.
+Pure client-side store edits — no network. The updater receives a `RecordSourceProxy`.
 
 ```tsx
 import { commitLocalUpdate, graphql } from 'react-relay';
@@ -612,6 +667,150 @@ The payload is processed like a query response, and it resolves data-driven depe
 
 ---
 
+## Typesafe Updaters
+
+Typesafe updaters replace `setValue` and `setLinkedRecord` calls with typed property assignment. The API is identical on v20 and v21.
+
+| Directive | Where | Purpose |
+|---|---|---|
+| `@updatable` | query, fragment definition | Selects the fields that an updater reads and writes. Relay never fetches them. |
+| `@assignable` | fragment definition | Marks a type that a linked field accepts. The fragment contains only `__typename`. |
+
+`readUpdatableFragment(fragment, ref)` and `readUpdatableQuery(query, variables)` exist on `RecordSourceProxy` and `RecordSourceSelectorProxy`. Both return `{ updatableData }`. Assigning to a property of `updatableData` writes to the store.
+
+### Scalar fields
+
+```tsx
+commit({
+  variables,
+  updater: (store, response) => {
+    const feedbackRef = response?.feedback_create?.feedback;
+    if (feedbackRef == null) return;
+    const { updatableData } = store.readUpdatableFragment(
+      graphql`
+        fragment CreateFeedback_updatable_feedback on Feedback @updatable {
+          is_new_comment
+        }
+      `,
+      feedbackRef,
+    );
+    updatableData.is_new_comment = true;
+  },
+  // The mutation selects ...CreateFeedback_updatable_feedback under feedback.
+});
+```
+
+`readUpdatableQuery` needs no fragment reference. It suits click handlers that call `commitLocalUpdate`:
+
+```tsx
+commitLocalUpdate(environment, store => {
+  const { updatableData } = store.readUpdatableQuery(
+    graphql`query NameUpdaterUpdateQuery @updatable { viewer { name } }`,
+    {},
+  );
+  if (updatableData.viewer != null) updatableData.viewer.name = newName;
+});
+```
+
+Use `readUpdatableQuery` when you have no fragment reference, when the parent is the `Query` root (an updatable fragment cannot be spread at the top level), or when the selection needs variables. An updatable fragment reuses the variables of the query that spreads it.
+
+### Rules
+
+- Relay never fetches the fields of an updatable query or fragment, even when a regular query spreads the fragment. To fetch and update a field, select it in a regular selection as well.
+- Updatable data can be missing when the store does not hold the record.
+- An updatable selection cannot spread regular fragments. `@defer` and similar directives are not allowed.
+- `id`, `__id`, `__typename` and `js` have no setter.
+- `readUpdatableFragment` does not accept plural fragment references (v21 source `readUpdatableFragment.js`).
+
+### Linked fields
+
+An assignment to a linked field needs the same `@assignable` fragment on the source and on the destination field:
+
+```tsx
+graphql`
+  fragment AssignBestFriendButton_assignable_user on User @assignable {
+    __typename
+  }
+`;
+
+// source: a read-only fragment
+const data = useFragment(graphql`
+  fragment AssignBestFriendButton_someType on SomeType {
+    user { name ...AssignBestFriendButton_assignable_user }
+  }
+`, someTypeRef);
+
+commitLocalUpdate(environment, store => {
+  const { updatableData } = store.readUpdatableQuery(
+    graphql`
+      query AssignBestFriendButtonUpdatableQuery @updatable {
+        viewer { best_friend { ...AssignBestFriendButton_assignable_user } }
+      }
+    `,
+    {},
+  );
+  if (data.user != null && updatableData.viewer != null) {
+    updatableData.viewer.best_friend = data.user;
+  }
+});
+```
+
+- Every assigned value originates in a read-only fragment, query, mutation or subscription. `updatableData.foo = updatableData.foo` is invalid.
+- To append to a list, select the current list in a read-only fragment (with the `@assignable` spread on its items) and assign a new array: `updatableData.viewer.best_friends = [...viewer.best_friends, data.user]`.
+- Assigning `null` to a singular linked field sets the link to `null`. Check for `null` first.
+- Assigning `null` to a plural linked field throws. Assign `[]` instead. Items must not be `null`.
+- The assigned record must exist in the store. Otherwise Relay throws `Did not find item with data id <id> in the store.`
+- The assigned object guarantees only `__typename`. A consumer cannot assume that other fields are present.
+- To assign from an abstract type, refine it with an inline fragment and check `__typename`:
+
+```tsx
+const data = useFragment(graphql`
+  fragment Foo_query on Query {
+    node(id: "4") {
+      ... on User { __typename ...AssignBestFriendButton_assignable_user }
+    }
+  }
+`, queryRef);
+
+if (data.node != null && data.node.__typename === 'User' && updatableData.viewer != null) {
+  updatableData.viewer.best_friend = data.node;
+}
+```
+
+- Assignment to an interface-typed field (for example `Actor`) from a source that implements the interface needs no extra step. When the source type is not known to implement the interface (for example `Node`), the compiler emits `__isFoo_actor?: string`, and the assignment fails to type-check. Each generated artifact exports a `validate` function that returns the value (with the non-optional type) or `false`. The docs show this function in Flow-commented JavaScript. The TypeScript artifact has the same function with TypeScript type annotations (`relay-typegen/src/write.rs`).
+
+```tsx
+import { validate as validateActor } from './__generated__/Foo_actor.graphql';
+
+const validActor = validateActor(data.node);
+if (validActor !== false) updatableData.viewer.actor = validActor;
+```
+
+Sources: `guided-tour/updating-data/imperatively-modifying-store-data`, `imperatively-modifying-linked-fields`, `typesafe-updaters-faq` (v21 docs); `packages/relay-runtime/mutations/createUpdatableProxy.js` (v21 tag).
+
+---
+
+## Client-Only Data
+
+Client schema extensions add fields and types that the server does not define. List the `.graphql` files or folders in the `schemaExtensions` compiler option (see `network.md` section 12 for the config).
+
+- A new client field reads as `undefined` until an updater writes it. Prime it with `commitLocalUpdate`:
+
+```ts
+commitLocalUpdate(environment, store => {
+  const user = store.getRoot().getLinkedRecord('viewer');
+  user?.setLinkedRecords([], 'notes');
+});
+```
+
+- A query that mixes client and server fields with `useLazyLoadQuery` needs at least 1 server field. An introspection field such as `__typename` counts. A query with only client fields uses `useClientQuery`.
+- Create client records with an ID that starts with `client:`, such as `client:Note:1`.
+- A mounted query retains its data. For data that no component renders, call `environment.retain(operation)` and dispose the result when the data can be garbage collected.
+- To delete a client record, remove it from the parent list with `setLinkedRecords` and call `store.delete(id)`. Edges to a deleted record read as `undefined`, even when the type is non-null. With `@throwOnFieldError`, the read throws.
+- Mutation and subscription updaters can also write client fields, because the response never contains them.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
@@ -631,3 +830,10 @@ The payload is processed like a query response, and it resolves data-driven depe
 | `commitLocalUpdate` change not re-rendering | Component reads a different record than the one edited | Verify you edited the exact `dataID` being rendered; check with `getDataID()` |
 | Subscription updates duplicate edges | Server emits edges already in the connection | Guard in updater: `ConnectionHandler.deleteNode` first, or dedupe by id |
 | "Missing field 'X' on record" warning | Wrote partial data via `create` without required selected fields | Set every field the UI reads, or refetch via `invalidateRecord` |
+| Client-only field reads `undefined` | No updater wrote the field yet | Prime it with `commitLocalUpdate` |
+| Query with only client fields misbehaves under `useLazyLoadQuery` | The docs require at least 1 server field per such query | Add a server field such as `__typename`, or use `useClientQuery` |
+| `Did not find item with data id <id> in the store.` | Typesafe assignment of a record that the store does not hold | Fetch or create the record before the assignment |
+| Assigning `null` to a plural linked field throws | Plural setters reject `null` | Assign `[]` |
+| Updatable field is `undefined` after `readUpdatableFragment` | Relay never fetches updatable fields | Select the field in a regular query or fragment too |
+| Like count stays +2 after one optimistic rollback | Relay does not recalculate later optimistic values | Compute the value in `optimisticUpdater` from the store |
+| `updater` argument `data` is `null` | Mutation returned no data | Guard with `data?.field` |

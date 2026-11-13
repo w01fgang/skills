@@ -49,6 +49,7 @@ const user = useFragment(graphql`...UserCard_user @arguments(size: 128, withPost
 **Pitfalls**
 - `type:` is a string; include the trailing `!` for non-null.
 - A `provider` module must export `{ get(): T }`; providers cannot have defaults.
+- `get()` returns the same value on every call within a run. A parent cannot pass a provided variable through `@arguments`. Relay renames provided variables to `__relay_internal__pv__<Module>` in the operation (unstable; visible when you debug a query).
 - Types must match the usage site; compiler errors surface at build time.
 
 ### `@arguments`
@@ -133,12 +134,13 @@ function logUser(userRef) {
 ```
 
 **Pitfalls**
-- Cannot contain `@defer`, `@stream`, or `@module`.
+- A spread of an `@inline` fragment accepts `@alias` and `@dangerously_unaliased_fixme` only. Each other directive on the spread (`@defer`, `@module`, `@include`, `@skip`) is a compiler error.
 - Not a substitute for `useFragment` — component render must still subscribe.
 
 ### `@relay(plural: Boolean)`
 
-Marks a fragment as expecting an array of refs.
+Marks a fragment as expecting an array of refs. The fragment spread sits inside
+a list field.
 
 ```graphql
 fragment Avatars_users on User @relay(plural: true) {
@@ -183,6 +185,7 @@ declarative mutation directives.
   filters: [String!]          # arg names that differentiate connections
   handler: String              # custom ConnectionHandler
   dynamicKey_UNSTABLE: String  # advanced, runtime-keyed connections
+  prefetchable_pagination: Boolean = false  # required by usePrefetchableForwardPaginationFragment
 )
 ```
 
@@ -218,7 +221,7 @@ const { data, loadNext, hasNext, isLoadingNext } = usePaginationFragment(
 
 ## Declarative mutation updates
 
-All four operate on **mutation, subscription or query response fields** and need a
+These directives operate on **mutation, subscription or query response fields** and need a
 `connections: [ID!]!` variable populated from `__id` on the parent connection.
 
 ```graphql
@@ -363,7 +366,7 @@ function Profile({ queryRef }) {
 - Requires a server that supports GraphQL incremental delivery (`multipart/mixed`
   or SSE).
 - `label` must be unique per operation.
-- Cannot appear inside `@inline` fragments.
+- `@defer` on a spread of an `@inline` fragment is a compiler error.
 
 ### `@stream`
 
@@ -383,13 +386,30 @@ query SearchQuery($term: String!) {
 }
 ```
 
+### `@defer` / `@stream` arguments
+
+The exported v20 and v21 sources do not define `@defer` and `@stream`. The
+argument names below come from the runtime tests and `RelayResponseNormalizer.js`,
+identical on v20 and v21 (`initial_count` appears 55 times in each; `initialCount`
+appears 0 times).
+
+| Argument | Applies to | Rule |
+|----------|-----------|------|
+| `label` | `@defer`, `@stream` | String that identifies the incremental chunk |
+| `if` | `@defer`, `@stream` | Boolean literal or variable. Any other value logs a dev warning. |
+| `initial_count` | `@stream` | Snake case. Number of items in the initial payload. |
+
+- `@defer(if: false)`: the data arrives in the initial payload. Relay expects no extra chunk.
+- `@stream(if: false)`: Relay normalizes the initial array and registers no streaming placeholder.
+- `@stream` always normalizes the items of the initial payload, including the first `initial_count` items.
+
 ### `@stream_connection`
 
 `@connection` plus streaming. Used with `usePaginationFragment`; items past
 `initial_count` arrive in follow-up payloads.
 
 **Signature** — accepts every `@connection` argument plus
-`initial_count: Int = 0` and `if: Boolean = true`.
+`label: String`, `initial_count: Int!`, `if: Boolean = true` and `use_customized_batch: Boolean = false`.
 
 ```graphql
 fragment Friends_user on User
@@ -404,6 +424,7 @@ fragment Friends_user on User
 **Pitfalls**
 - Do not combine `@connection` and `@stream_connection` on the same field.
 - `initial_count` does not cap the total — only the size of the first payload.
+- The v21 and v20 SDL (`relay-extensions.graphql`) declares `@stream_connection(key: String!, filters: [String], handler: String, label: String, initial_count: Int!, if: Boolean = true, use_customized_batch: Boolean = false, dynamicKey_UNSTABLE: String, prefetchable_pagination: Boolean = false)`. The SDL marks `initial_count` as required (`Int!`). The Streaming Pagination guide calls it optional with default 0. Pass it always.
 
 ---
 
@@ -442,6 +463,20 @@ fragment UserEmail_user on User {
   parent (`NONE` < `LOG` < `THROW`).
 - Inside a `@connection`, `@required` on the `node` field or on its direct
   child fields is a compiler error.
+- `@required` is local to the fragment. Every selection of the same field in 1
+  fragment (for example in several inline fragments) must carry the same
+  `@required` declaration. Otherwise the compiler reports
+  `All references to a field must have matching @required declarations.`
+- `@required` on a top-level field of a fragment can make the object that
+  `useFragment` returns nullable.
+- In a plural field, a missing `@required(action: LOG)` field sets the list item
+  to `null`. The list stays an array.
+- A `@required` field inside an inline fragment stays optional in the types,
+  because the object can have another type. Select `__typename` next to the
+  inline fragment to get a discriminated union.
+- `@required` on a fragment spread that has `@alias` is not supported.
+- Under a `@catch` ancestor, a null `@required(action: THROW)` field bubbles up
+  as a caught error. The read does not throw.
 
 ### `@throwOnFieldError`
 
@@ -498,6 +533,15 @@ const { name, followerCount, latestPost } = useFragment(...);
   `@throwOnFieldError`.
 - `@catch` and `@throwOnFieldError` cover the fields of their own query,
   fragment or mutation. Fields of a spread fragment need their own directive.
+- An error bubbles to the nearest `@catch` ancestor. With `@catch` on `viewer`,
+  an error on `viewer.name` yields `viewer: { ok: false, errors: [{ path: ['viewer', 'name'] }] }`.
+  With `@catch` on `name`, the error stays on `name`.
+- `@catch` also catches a null `@required(action: THROW)` field below it and
+  missing data (store data absent for a selected field).
+- Fields that `@catch` covers use their semantic nullability in the generated
+  types. A `@semanticNonNull` field is non-null there.
+- `@catch` without `@throwOnFieldError` still returns the error in the data.
+  Fields outside any `@catch` do not throw.
 
 ### `@semanticNonNull`
 
@@ -526,6 +570,19 @@ type User {
 In client code, generated types expose `user.name` as `string`, not `string | null`.
 Must be combined with `@throwOnFieldError` (or a `@catch`) on the reader so
 errors surface rather than crash at runtime.
+
+Schema declaration (SDL):
+
+```graphql
+directive @semanticNonNull(levels: [Int] = [0]) on FIELD_DEFINITION
+```
+
+Relay reads the directive from the schema file. Add a React error boundary above
+each component that reads a `@throwOnFieldError` fragment. The extension SDL
+comment names a typegen option
+`experimental_emit_semantic_nullability_types`. No compiler source file at tag
+v20.1.1 or v21.0.1 reads that name. Use `@throwOnFieldError` or `@catch` to get
+the non-null types.
 
 ### `@alias`
 
@@ -557,6 +614,47 @@ if (data.actor.asUser != null) {
 **Pitfalls**
 - Without `@alias`, inline fragments on non-matching types leave fields
   `undefined` rather than exposing a typed `null`.
+
+**Conditional spreads.** `@alias` on a spread with `@skip` / `@include` or an
+abstract type condition exposes the fragment key as a nullable field. A null
+check shows whether Relay fetched the fragment:
+
+```graphql
+fragment MyFragment on User {
+  ...ConditionalData @skip(if: $someVar) @alias
+}
+```
+
+```tsx
+if (user.ConditionalData == null) return "No data fetched";
+return <ConditionalData userKey={user.ConditionalData} />;
+```
+
+**Grouping required fields.** An aliased inline fragment without a type
+condition groups fields that use `@required(action: NONE)`. One null check covers
+the group:
+
+```graphql
+fragment MyFragment on User {
+  id
+  ... @alias(as: "requiredFields") {
+    name @required(action: NONE)
+    email @required(action: NONE)
+  }
+}
+```
+
+If `name` or `email` is null, `user.requiredFields` is null and `id` stays set.
+
+**Enforcement.** Relay requires `@alias` on every conditionally fetched spread
+(`@skip` / `@include`, or a type condition that can mismatch). The compiler
+feature flag `enforce_fragment_alias_where_ambiguous` controls the check. The
+alias guide says to disable the flag to turn the validation off. The directive
+`@dangerously_unaliased_fixme` (on `FRAGMENT_SPREAD`) suppresses the error on an
+existing spread. Do not add new uses. Replace each use with `@alias`. The
+`mark-dangerous-conditional-fragment-spreads` codemod (see `codemods.md`)
+applies the directive project-wide. The Relay VS Code extension offers quick
+fixes for both.
 
 ---
 
@@ -773,7 +871,82 @@ import { MatchContainer } from "react-relay";
 **Pitfalls**
 - Requires a loader (e.g. Webpack / Haste) that resolves `@module(name:)`
   strings.
-- Module-backed fragments should be `@no_inline` (the compiler enforces this).
+- With the `no_inline` feature flag on, `@module` makes its fragment `@no_inline` implicitly. If a regular spread also uses that fragment, the compiler requires an explicit `@no_inline` on the fragment definition.
+
+**Rules (Server 3D and Client 3D)**
+
+- Wrap `MatchContainer` in `Suspense`. It can suspend while it loads the component or its data.
+- The loaded component reads the data on a prop named like the fragment suffix. For `Comment_comment`, the prop is `comment`, not `comment$key`.
+- 2 `@module` spreads under 1 `@match` field must target different concrete types. They can share an abstract parent (union or interface).
+- A fragment with 2 or more 3D fields needs a distinct key on each field after the first. The compiler reports `Invalid @module selection: documents with multiple fields containing 3D selections must specify a unique 'key' value for each field`. Add the key:
+
+```graphql
+fragment Example_comment on Comment {
+  comment_content_renderer @match {
+    ...CommentMarkdownRenderer_comment @module(name: "CommentMarkdownRenderer.react")
+  }
+  attachments {
+    attachment_renderer @match(key: "Example_comment__attachment") {
+      ...CommentAttachmentPhotoRenderer_comment @module(name: "CommentPhotoRenderer.react")
+    }
+  }
+}
+```
+
+- `@module` also works without `@match` on a single concrete type, as in `image { ...CommentImage_image @module(name: "CommentImage.react") }`.
+
+**Server 3D** needs server support. In OSS, each concrete type exposes `__component: JSDependency` and `__fragment: JSDependency`, and the `@match` field takes a `supported: [String!]` argument that the compiler fills in. The docs say Relay does not fully support Server 3D in OSS.
+
+**Client 3D** reads data from client-side resolvers (interface in a client schema extension, concrete resolver types that implement it, query through `useClientQuery`). It needs the `moduleImportConfig` compiler option:
+
+```json
+{
+  "moduleImportConfig": {
+    "dynamicModuleProvider": { "mode": "Custom", "statement": "() => require('./<$module>')" },
+    "surface": "resolvers"
+  }
+}
+```
+
+`<$module>` stands for the `@module(name:)` value. In OSS, `mode` is `Custom` and `surface` is `resolvers`. Client 3D can need extra round trips, because the client renders first to learn which code to load. Avoid nested Client 3D.
+
+---
+
+## Typesafe updaters
+
+### `@updatable` / `@assignable`
+
+`@updatable` (query or fragment definition) marks a selection that
+`store.readUpdatableQuery` / `store.readUpdatableFragment` read and write. Relay
+never fetches its fields. `@assignable` (fragment definition) marks a type that
+a linked field accepts. Its only field is `__typename`. Both exist on v20 and
+v21 with the same definition. See `updating-data.md`, "Typesafe Updaters".
+
+```graphql
+fragment Foo_updatable_user on User @updatable { is_selected }
+fragment Foo_assignable_user on User @assignable { __typename }
+```
+
+## Compiler config tied to directives
+
+| Option | Directive | Effect |
+|--------|-----------|--------|
+| `schemaExtensions` | client schema | Array of files or folders with client `.graphql` schema extensions |
+| `moduleImportConfig` | `@module` | `dynamicModuleProvider` (`mode`, `statement`) and `surface` for Client 3D |
+| `featureFlags.enforce_fragment_alias_where_ambiguous` | `@alias` | Requires `@alias` on conditional spreads. Default `enabled` in v21.0.1. In v20.1.1 the default applies when the config has a `featureFlags` object; set the flag explicitly on v20. |
+| `featureFlags.disallow_required_action_throw_on_semantically_nullable_fields` | `@required` | Rejects `THROW` on nullable fields that lack `@semanticNonNull`. Default `disabled`. v21 only. |
+| `featureFlags.allow_legacy_relay_resolver_tag` | resolver docblocks | Accepts `@RelayResolver` as an alias of `@relayType` / `@relayField`. Default `disabled`. v21 only. |
+
+Source: `relay-compiler-config-schema.json` (main branch). The v20 and v21
+tags do not export the config source. A flag value is `{ "kind": "enabled" }`,
+`{ "kind": "disabled" }` or a rollout (`{ "kind": "rollout", "rollout": 20 }`).
+
+## Directive definitions that differ between v20 and v21
+
+Only 2 definitions differ in `relay-extensions.graphql`:
+
+- `RequiredFieldAction` gains `DANGEROUSLY_THROW_ON_SEMANTICALLY_NULLABLE_FIELD` in v21.
+- `@exec_time_resolvers` gains the argument `useExperimentalProvider: String` in v21.
 
 ---
 
@@ -802,6 +975,9 @@ import { MatchContainer } from "react-relay";
 | `@catch`               | field / fragment / query / mutation             | Catch field errors into result |
 | `@semanticNonNull`     | schema field definition                         | Mark field non-null except on errors |
 | `@alias`               | fragment spread / inline fragment               | Null-safe nested access |
+| `@dangerously_unaliased_fixme` | fragment spread                         | Suppress the `@alias` enforcement error; do not add new uses |
+| `@updatable`           | query / fragment def                            | Typesafe updater selection; never fetched |
+| `@assignable`          | fragment def                                    | Type accepted by a linked-field assignment |
 | `@relayField`          | docblock                                        | Define resolver field (v20: `@RelayResolver`) |
 | `@relayType`           | docblock                                        | Define resolver type (v20: `@RelayResolver`) |
 | `@rootFragment`        | docblock                                        | Data a derived resolver reads |
