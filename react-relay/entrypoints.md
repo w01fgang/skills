@@ -338,7 +338,7 @@ Props:
 - **`entryPointReference`** — from `loadEntryPoint` or `useEntryPointLoader`.
 - **`props`** — runtime props forwarded to the component's `props` argument (typed as `TRuntimeProps`).
 
-The container suspends until both the code chunk and query data are ready, so wrap it in `<Suspense>`.
+Wrap the container in `<Suspense>`.
 
 - The container itself suspends until the `root` module loads. It renders the component with the `queries`, `entryPoints`, `extraProps` and `props` values. The query data suspends inside the component, in its `usePreloadedQuery` calls.
 - The container logs a dev warning when `entryPointReference` is disposed. The warning states that it becomes a hard error in a future release.

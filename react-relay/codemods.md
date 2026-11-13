@@ -31,7 +31,7 @@ On v20, only `mark-dangerous-conditional-fragment-spreads` and `remove-unnecessa
 
 ### `mark-dangerous-conditional-fragment-spreads` (v19+)
 
-Adds `@dangerously_unaliased_fixme` to every fragment spread that is only conditionally fetched (guarded by `@skip`/`@include`, or matching an abstract type where the runtime type might not implement the fragment's type condition). Use this when upgrading to v19, which enforces `@alias` on such spreads.
+Adds `@dangerously_unaliased_fixme` to every fragment spread that is only conditionally fetched (guarded by `@skip`/`@include`, or matching an abstract type where the runtime type might not implement the fragment's type condition). Use this when upgrading to v19, which enforces `@alias` on such spreads. On v20.1.1 a config without a `featureFlags` object leaves the enforcement flag `disabled`; set `enforce_fragment_alias_where_ambiguous` explicitly.
 
 ```bash
 npx relay-compiler codemod mark-dangerous-conditional-fragment-spreads

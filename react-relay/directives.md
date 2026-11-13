@@ -134,7 +134,7 @@ function logUser(userRef) {
 ```
 
 **Pitfalls**
-- A spread of an `@inline` fragment accepts `@alias` and `@dangerously_unaliased_fixme` only. Each other directive on the spread (`@defer`, `@module`, `@include`, `@skip`) is a compiler error.
+- The compiler transform for `@inline` accepts `@alias` and `@dangerously_unaliased_fixme` on a spread of an `@inline` fragment. For another directive on that spread it reports `The directive @<name> on fragment spreads for @inline fragments are not yet supported`.
 - Not a substitute for `useFragment` — component render must still subscribe.
 
 ### `@relay(plural: Boolean)`
@@ -366,7 +366,6 @@ function Profile({ queryRef }) {
 - Requires a server that supports GraphQL incremental delivery (`multipart/mixed`
   or SSE).
 - `label` must be unique per operation.
-- `@defer` on a spread of an `@inline` fragment is a compiler error.
 
 ### `@stream`
 
@@ -933,7 +932,7 @@ fragment Foo_assignable_user on User @assignable { __typename }
 |--------|-----------|--------|
 | `schemaExtensions` | client schema | Array of files or folders with client `.graphql` schema extensions |
 | `moduleImportConfig` | `@module` | `dynamicModuleProvider` (`mode`, `statement`) and `surface` for Client 3D |
-| `featureFlags.enforce_fragment_alias_where_ambiguous` | `@alias` | Requires `@alias` on conditional spreads. Default `enabled` in v21.0.1. In v20.1.1 the default applies when the config has a `featureFlags` object; set the flag explicitly on v20. |
+| `featureFlags.enforce_fragment_alias_where_ambiguous` | `@alias` | Requires `@alias` on conditional spreads. Default `enabled` in v21.0.1. In v20.1.1 a config without a `featureFlags` object leaves the flag `disabled`; a `featureFlags` object without this key gives `enabled`. Set the flag explicitly on v20. |
 | `featureFlags.disallow_required_action_throw_on_semantically_nullable_fields` | `@required` | Rejects `THROW` on nullable fields that lack `@semanticNonNull`. Default `disabled`. v21 only. |
 | `featureFlags.allow_legacy_relay_resolver_tag` | resolver docblocks | Accepts `@RelayResolver` as an alias of `@relayType` / `@relayField`. Default `disabled`. v21 only. |
 

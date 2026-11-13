@@ -203,7 +203,7 @@ Ship `persisted_queries.json` to the server at deploy time. The browser bundle n
 | `file` | Path of a local JSON file. The compiler writes the map `id → operation text` to it. Use `file` or `url`. |
 | `algorithm` | Hash for the local file: `MD5`, `SHA256` or `SHA1`. The default is `MD5`. |
 
-The compiler config schema on the `main` branch lists more keys. They are not confirmed for v21.0.1. Print the schema of your installed version with `relay-compiler config-json-schema` before you use them.
+The compiler config schema at tags v20.1.1 and v21.0.1 lists more keys. Print the schema of your installed version with `relay-compiler config-json-schema`.
 
 - Remote: `headers`, `concurrency`, `includeQueryText`.
 - Local: `include_query_text` (snake case).

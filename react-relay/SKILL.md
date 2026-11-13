@@ -15,7 +15,7 @@ description: Use when working with Relay in a React app — writing fragments, q
 
 ## Version check — do this first
 
-Read the `react-relay` and `relay-compiler` versions in `package.json`. This skill describes Relay v21.0.1 and marks each item that differs in v20. Everything without a version mark works the same in v20.1 and v21.
+Read the `react-relay` and `relay-compiler` versions in `package.json`. This skill describes Relay v21.0.1. The table lists the main differences in v20. Each file marks the other v21-only items (log events, CLI subcommands, type fields) at the place of use. An item without a version mark has the same docs text or the same source in v20.1 and v21.
 
 | Item | Relay v20 | Relay v21 |
 |---|---|---|
@@ -29,6 +29,10 @@ Read the `react-relay` and `relay-compiler` versions in `package.json`. This ski
 | `@oneOf` input types | Object type with all-optional fields | Union type that permits 1 property; `"oneOfType": "ignore"` restores the object type |
 | `react-relay/rsc_EXPERIMENTAL` | Absent | Present, experimental |
 | `usePreloadedQuery` with a null ref | Throws (the hook destructures the ref) | Returns `null` at runtime (Flow). The TypeScript type stays non-null. |
+| `useMutation` after the component unmounts | Skips the `isInFlight` state update | Sets the state without a mounted check |
+| `@alias` enforcement flag `enforce_fragment_alias_where_ambiguous` | `disabled` when the config has no `featureFlags` object | `enabled` by default |
+| Feature flags `allow_legacy_relay_resolver_tag` and `disallow_required_action_throw_on_semantically_nullable_fields` | Absent | Present, default `disabled` |
+| Environment and Store option `deferDeduplicatedFields` | Absent | Present |
 
 The resolver examples in [resolvers.md](./resolvers.md) and [directives.md](./directives.md) use the v21 tags. On v20, write `@RelayResolver` in place of `@relayType` and `@relayField`; the rest of each docblock is the same.
 
