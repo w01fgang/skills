@@ -111,7 +111,7 @@ const store = new Store(source, {queryCacheExpirationTime: 5 * 60 * 1000 });
 | `gcScheduler` | `resolveImmediate` | A function that accepts a callback and schedules a garbage collection run. Provide one to make scheduling less aggressive, for example based on time or scheduler priorities. By convention, implementations do not execute the callback immediately. |
 | `gcReleaseBufferSize` | `10` | The number of released queries that the Store keeps retained. With a size of 0, Relay collects queries immediately after release. |
 | `queryCacheExpirationTime` | none | Age in ms after which a fetched query is stale. Without it, staleness checks look only at invalidated records. |
-| `resolverContext` | none | Value that Relay passes to live resolvers (see `resolvers.md`). Pass it to `RelayModernStore`. |
+| `resolverContext` | none | Value that Relay passes to resolvers (see `resolvers.md`). Pass it to `RelayModernStore`. |
 
 ### `publish()` and `notify()`
 

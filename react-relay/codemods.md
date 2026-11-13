@@ -1,6 +1,6 @@
 # Relay Codemods
 
-The Relay compiler makes changes across the source files of your projects with codemods. The compiler `codemod` command lists the available codemods.
+The Relay compiler makes changes across the source files of your projects with codemods. The compiler `codemod` command lists the available codemods. The docs write the command as `relay codemod`. The binary of the `relay-compiler` npm package at v20.1.1 and v21.0.1 is `relay-compiler`: run `npx relay-compiler codemod <name>`.
 
 ## Compiler-bundled codemods
 

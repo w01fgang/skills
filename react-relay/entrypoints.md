@@ -107,7 +107,7 @@ const getEntrypointReference = environment => loadEntryPoint(
 
 Arguments:
 
-- **`environmentProvider`** — a provider for the Relay Environment instance that executes the request. Inside a React component, use the environment from [`useRelayEnvironment`](../use-relay-environment/).
+- **`environmentProvider`** — a provider for the Relay Environment instance that executes the request. Inside a React component, use the environment from `useRelayEnvironment`.
 - **`EntryPoint`** — the EntryPoint to load.
 - **`entryPointParams`** — the parameters that Relay passes to the `getPreloadProps` method of the EntryPoint.
 

@@ -259,7 +259,7 @@ Pass a config file path as the positional `[CONFIG]` argument.
 
 ### Codemods
 
-`relay codemod <name>` runs one of: `mark-dangerous-conditional-fragment-spreads` (option `-r`/`--rollout-percentage`), `remove-unnecessary-required-directives` and `fix-all` (v21 only). `fix-all` runs all Relay compiler transforms and applies fixes for every fixable diagnostic. Run it after you update the Relay version.
+`relay-compiler codemod <name>` runs one of: `mark-dangerous-conditional-fragment-spreads` (option `-r`/`--rollout-percentage`), `remove-unnecessary-required-directives` and `fix-all` (v21 only). `fix-all` runs all Relay compiler transforms and applies fixes for every fixable diagnostic. Run it after you update the Relay version.
 
 ### VS Code extension and LSP
 

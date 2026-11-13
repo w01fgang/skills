@@ -40,13 +40,13 @@ The resolver examples in [resolvers.md](./resolvers.md) and [directives.md](./di
 
 | Topic | File | When |
 |---|---|---|
-| Hook APIs, signatures, examples | [hooks.md](./hooks.md) | Writing/reading any `use*` hook |
+| Hook APIs, arguments, examples | [hooks.md](./hooks.md) | Writing/reading any `use*` hook |
 | GraphQL directives reference | [directives.md](./directives.md) | Adding `@connection`, `@refetchable`, `@defer`, etc. |
 | Mutations, connections, optimistic UI | [updating-data.md](./updating-data.md) | Writing mutations or modifying the store |
 | Fetch policies, GC, staleness | [caching.md](./caching.md) | Choosing fetch policy or debugging cache behavior |
-| Custom fetch, auth, subs transport, persisted queries | [network.md](./network.md) | Configuring Network layer or server integration |
+| Network layer, subscriptions transport, persisted queries, server specification | [network.md](./network.md) | Configuring Network layer or server integration |
 | Client-side derived state, live fields | [resolvers.md](./resolvers.md) | Using `@relayField` / `@relayType` (v21) or `@RelayResolver` (v20) |
-| EntryPoint APIs, code-split routing | [entrypoints.md](./entrypoints.md) | Route-level preloading |
+| EntryPoint APIs | [entrypoints.md](./entrypoints.md) | Route-level preloading |
 | Imperative APIs (outside React) | [runtime.md](./runtime.md) | `fetchQuery`, `commitMutation`, `Store`, `Environment` |
 | Testing components, mocking payloads | [testing.md](./testing.md) | Writing Jest/RTL tests |
 | DevTools, typename error, null fields | [debugging.md](./debugging.md) | Something broke |
@@ -100,6 +100,12 @@ function QueryFetcherExample() {
   ] = useQueryLoader(
     AppQuery,
   );
+
+  if (queryReference == null) {
+    return (
+      <Button onClick={() => loadQuery({})}> Click to reveal the name </Button>
+    );
+  }
 }
 
 function NameDisplay({ queryReference }) {
