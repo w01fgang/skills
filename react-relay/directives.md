@@ -1,11 +1,6 @@
 # Relay GraphQL Directives
 
-Reference for every directive Relay understands. Grouped by use case. Hooks-only
-(no legacy `createFragmentContainer` / `createRefetchContainer` directives).
-
-All examples assume `relay-compiler` and the React hooks runtime (`useFragment`,
-`usePreloadedQuery`, `useLazyLoadQuery`, `usePaginationFragment`,
-`useRefetchableFragment`, `useMutation`, `useSubscription`).
+Reference for the directives that Relay documents. Grouped by use case.
 
 ---
 
@@ -13,160 +8,197 @@ All examples assume `relay-compiler` and the React hooks runtime (`useFragment`,
 
 ### `@argumentDefinitions`
 
-Declares local arguments (or provided variables) on a fragment.
-
-**Signature**
-
-```graphql
-@argumentDefinitions(
-  name: { type: "TypeName", defaultValue?: Any, provider?: "./providerPath" }
-  ...
-)
-```
+Specifies the arguments that a fragment takes.
 
 **Where** — fragment definition (after `fragment Foo on Type`).
 
 **Example**
 
 ```graphql
-fragment UserCard_user on User
-  @argumentDefinitions(
-    size: { type: "Int", defaultValue: 64 }
-    withPosts: { type: "Boolean!", defaultValue: false }
-    viewerLocale: { type: "String!", provider: "./LocaleProvider.relayprovider" }
-  ) {
-  name
-  avatar(size: $size) { url }
-  posts @include(if: $withPosts) { id }
-  greeting(locale: $viewerLocale)
+fragment TodoList_list on TodoList
+@argumentDefinitions(
+  count: {type: "Int", defaultValue: 10} # Optional argument
+  userID: {type: "ID"} # Required argument
+) {
+  title
+  todoItems(userID: $userID, first: $count) {
+    # Use fragment arguments here as variables
+    ...TodoItem_item
+  }
 }
 ```
 
-```tsx
-const user = useFragment(graphql`...UserCard_user @arguments(size: 128, withPosts: true)`, ref);
+**Provided variables.** A provided variable is a fragment variable whose value a provider function supplies at runtime. To add one:
+
+- Add an argument with `provider: "[JSModule].relayprovider"` to `@argumentDefinitions`.
+- Make sure that `[JSModule].relayprovider.js` exists and exports a `get()` function. `get` returns the same value on every call for a given run.
+
+```graphql
+fragment TodoItem_item on TodoList
+@argumentDefinitions(
+  include_timestamp: {
+    type: "Boolean!"
+    provider: "Todo_ShouldIncludeTimestamp.relayprovider"
+  }
+) {
+  timestamp @include(if: $include_timestamp)
+  text
+}
+```
+
+```javascript
+// Todo_ShouldIncludeTimestamp.relayprovider.js
+export default {
+  get(): boolean {
+    // must always return true or false for a given run
+    return check('todo_should_include_timestamp');
+  },
+};
 ```
 
 **Pitfalls**
-- `type:` is a string; include the trailing `!` for non-null.
-- A `provider` module must export `{ get(): T }`; providers cannot have defaults.
-- `get()` returns the same value on every call within a run. A parent cannot pass a provided variable through `@arguments`. Relay renames provided variables to `__relay_internal__pv__<Module>` in the operation (unstable; visible when you debug a query).
-- Types must match the usage site; compiler errors surface at build time.
+- A parent cannot pass a provided variable through `@arguments`, even though the fragment declares it in `argumentDefinitions`.
+- An argument definition cannot specify both a provider and a `defaultValue`.
+- Unstable, subject to change: Relay transforms provided variables to operation root variables and renames them to `__relay_internal__pv__[JsModule]`. This matters only when you debug a query that uses provided variables.
 
 ### `@arguments`
 
-Passes values for a fragment's `@argumentDefinitions` at a spread site.
-
-**Signature** — `@arguments(name: Value, ...)`
+Passes arguments to a fragment that `@argumentDefinitions` defines.
 
 **Where** — fragment spread.
 
 **Example**
 
 ```graphql
-query ProfileQuery($id: ID!) {
-  user(id: $id) {
-    ...UserCard_user @arguments(size: 256, withPosts: true)
-  }
+query TodoListQuery($userID: ID) {
+  ...TodoList_list @arguments(count: $count, userID: $userID) # Pass arguments here
 }
 ```
-
-**Pitfalls**
-- Missing an argument without a default triggers a compile error.
-- You cannot pass `@arguments` to a fragment that lacks `@argumentDefinitions`.
 
 ### `@refetchable`
 
-Generates a query that refetches the fragment. Unlocks
-`useRefetchableFragment` and `usePaginationFragment`.
+Generates a query that refetches the fragment. `useRefetchableFragment` and `usePaginationFragment` expect it.
 
-**Signature**
+**Signature** — `@refetchable(queryName: String!, directives: [String], preferFetchable: Boolean)`
 
-```graphql
-@refetchable(
-  queryName: String!
-  directives: [String!]       # directives to copy to the generated query
-  preferFetchable: Boolean    # prefer @fetchable types over Node when both apply
-)
-```
+**Where** — fragment on `Viewer` or `Query`, or on a type that implements `Node` (a type that has an `id`). The directive autogenerates a query with the specified `queryName`. The generated types of that query are available from the generated file `<queryName>.graphql.js`.
 
-**Where** — fragment on `Query`, `Viewer`, or any type implementing `Node` (or
-annotated `@fetchable`).
+`directives` is an optional list of directives to add to the autogenerated query. `preferFetchable` tells the compiler to prefer generating `fetch_MyType(): MyType` queries for types that implement the `Node` interface. This helps schemas that have adopted the `@strong` and `@fetchable` server annotations for types.
 
 **Example**
 
-```graphql
-fragment Feed_viewer on Viewer
-  @refetchable(queryName: "FeedRefetchQuery") {
-  posts(first: $count) @connection(key: "Feed_posts") {
-    edges { node { id ...PostRow_post } }
-  }
-}
-```
+```javascript
+const [data, refetch] = useRefetchableFragment(
+  graphql`
+    fragment CommentBody_comment on Comment
+    @refetchable(queryName: "CommentBodyRefetchQuery") {
+      body(lang: $lang) {
+        text
+      }
+    }
+  `,
+  props.comment,
+);
 
-```tsx
-const [data, refetch] = useRefetchableFragment(graphql`...Feed_viewer`, viewer);
-refetch({ count: 20 }, { fetchPolicy: "network-only" });
+refetch({lang: 'SPANISH'}, {fetchPolicy: 'store-or-network'})
 ```
-
-**Pitfalls**
-- The fragment must have a single refetch identifier (`id` for `Node`, none for
-  `Query`/`Viewer`).
-- Name collisions with other generated queries — keep `queryName` unique.
 
 ### `@inline`
 
-Reads a fragment's data imperatively outside React render.
+Reads a fragment's data outside the render phase, or outside React. Read the data with `readInlineData`.
 
 **Where** — fragment definition.
 
 **Example**
 
-```graphql
-fragment logPayload_user on User @inline { id locale }
-```
+```javascript
+import {graphql, readInlineData} from 'react-relay';
 
-```ts
-import { readInlineData } from "react-relay";
-function logUser(userRef) {
-  const data = readInlineData(graphql`...logPayload_user`, userRef);
-  analytics.log("user", data);
+// non-React function called from React
+function processItemData(itemRef) {
+  const item = readInlineData(
+    graphql`
+      fragment processItemData_item on Item @inline {
+        title
+        price
+        creator {
+          name
+        }
+      }
+    `,
+    itemRef,
+  );
+  sendToThirdPartyApi({
+    title: item.title,
+    price: item.price,
+    creatorName: item.creator.name,
+  });
 }
 ```
 
-**Pitfalls**
-- The compiler transform for `@inline` accepts `@alias` and `@dangerously_unaliased_fixme` on a spread of an `@inline` fragment. For another directive on that spread it reports `The directive @<name> on fragment spreads for @inline fragments are not yet supported`.
-- Not a substitute for `useFragment` — component render must still subscribe.
+All React components that use this function spread the `processItemData_item` fragment:
+
+```javascript
+export default function MyComponent({item}) {
+  function handleClick() {
+    processItemData(item);
+  }
+
+  const data = useFragment(
+    graphql`
+      fragment MyComponent_item on Item {
+        ...processItemData_item
+        title
+      }
+    `,
+    item,
+  );
+
+  return <button onClick={handleClick}>Process {item.title}</button>;
+}
+```
 
 ### `@relay(plural: Boolean)`
 
-Marks a fragment as expecting an array of refs. The fragment spread sits inside
-a list field.
+Marks a fragment definition for `useFragment` as expecting a list of items. A query or parent spreads a `@relay(plural: true)` fragment within a plural field (a field backed by a GraphQL list).
 
-```graphql
-fragment Avatars_users on User @relay(plural: true) {
-  id
-  avatar { url }
+```javascript
+// Plural fragment definition
+graphql`
+  fragment TodoItems_items on TodoItem @relay(plural: true) {
+    id
+    text
+  }
+`;
+
+// Plural fragment usage: note the parent type is a list of items (`TodoItem[]`)
+fragment TodoApp_app on App {
+  items {
+    // parent type is a list here
+    ...TodoItem_items
+  }
 }
-```
-
-```tsx
-const users = useFragment(graphql`...Avatars_users`, refs /* User[] */);
 ```
 
 ### `@relay(mask: false)`
 
-Disables data masking so the parent sees the child's selections directly.
-Rarely needed; prefer `@inline`.
+Prevents data masking. A fragment that carries `@relay(mask: false)` makes its data available directly to the parent. The docs do not recommend `@relay(mask: false)`; use an `@inline` fragment.
 
-```graphql
-...Parent_user @relay(mask: false)
+Applied to a fragment definition, `@relay(mask: false)` changes the generated Flow types so that they work better when the fragment is included with the same directive. The Flow types are not exact objects and contain no internal marker fields.
+
+In the example below, the `user` prop includes the data for `id` and `name` wherever `...Component_internUser` is included:
+
+```javascript
+graphql`
+  fragment Component_internUser on InternUser @relay(mask: false) {
+    id
+    name
+  }
+`;
 ```
 
-On a fragment definition, `@relay(mask: false)` changes the generated types so
-the fragment is usable only through unmasked spreads.
-
 **Pitfalls**
-- Breaks the encapsulation guarantee. Do not combine with `@arguments`.
+- A single fragment shared across many containers is typically an anti-pattern. Abuse of this directive can cause over-fetching.
 
 ---
 
@@ -174,156 +206,174 @@ the fragment is usable only through unmasked spreads.
 
 ### `@connection`
 
-Registers a Relay connection for `usePaginationFragment`, store updaters, and
-declarative mutation directives.
+Marks a connection field for `usePaginationFragment`.
 
-**Signature**
+**Signature** — `@connection(key: String!, filters: [String])`. A connection that `usePrefetchableForwardPaginationFragment` reads also needs `prefetchable_pagination: true`.
 
-```graphql
-@connection(
-  key: String!
-  filters: [String!]          # arg names that differentiate connections
-  handler: String              # custom ConnectionHandler
-  dynamicKey_UNSTABLE: String  # advanced, runtime-keyed connections
-  prefetchable_pagination: Boolean = false  # required by usePrefetchableForwardPaginationFragment
-)
-```
-
-**Where** — a connection field (anything returning `XxxConnection`) inside a
-`@refetchable` fragment (for pagination).
+**Where** — a connection field inside a `@refetchable` fragment that `usePaginationFragment` reads.
 
 **Example**
 
-```graphql
-fragment Feed_viewer on Viewer
-  @refetchable(queryName: "FeedPaginationQuery") {
-  posts(first: $count, after: $cursor, category: $category)
-    @connection(key: "Feed_posts", filters: ["category"]) {
-    edges { node { id ...PostRow_post } }
+```javascript
+graphql`
+  fragment FriendsListComponent_user on User
+  @refetchable(queryName: "FriendsListPaginationQuery") {
+    name
+    friends(first: $count, after: $cursor)
+    @connection(key: "FriendsList_user_friends") {
+      edges {
+        node {
+          ...FriendComponent
+        }
+      }
+    }
   }
-}
-```
-
-```tsx
-const { data, loadNext, hasNext, isLoadingNext } = usePaginationFragment(
-  graphql`...Feed_viewer`,
-  viewerRef,
-);
+`;
 ```
 
 **Pitfalls**
-- `first`/`last` and `after`/`before` must be variables, not literals.
-- `filters` defaults to every non-pagination arg; narrow it to avoid cache
-  fragmentation.
-- Each `key` must be unique per component type.
+- Give each connection a static unique `key`. The recommended naming convention is `<fragment_name>_<field_name>`.
+- The values of the connection filters identify the connection in the Relay store. Pagination arguments (`first`, `last`, `before`, `after`) are excluded.
 
 ---
 
 ## Declarative mutation updates
 
-These directives operate on **mutation, subscription or query response fields** and need a
-`connections: [ID!]!` variable populated from `__id` on the parent connection.
+These directives work on mutation, subscription and query fields. They take a `connections` parameter: a GraphQL variable that contains an array of connection IDs. Obtain a connection ID from the `__id` field of the connection, or with `ConnectionHandler.getConnectionID`.
 
-```graphql
-query Example {
-  viewer {
-    posts(first: 10) @connection(key: "Feed_posts") {
-      __id   # feed this into the mutation as a connection ID
-      edges { node { id } }
+```javascript
+const fragmentData = useFragment(
+  graphql`
+    fragment StoryComponent_story on Story {
+      comments @connection(key: "StoryComponent_story_comments_connection") {
+        # Query for the __id field
+        __id
+
+        # ...
+      }
     }
-  }
-}
+  `,
+  props.story,
+);
+
+// Get the connection record id
+const connectionID = fragmentData?.comments?.__id;
 ```
 
 ### `@appendEdge` / `@prependEdge`
 
-Appends or prepends an edge payload to each listed connection.
+`@prependEdge` adds the selected edges to the beginning of each connection in the `connections` array. `@appendEdge` adds them to the end.
 
-**Signature** — `@appendEdge(connections: [ID!]!)`, same for `@prependEdge`.
+**Arguments** — `connections`: an array of connection IDs.
 
-**Where** — a response field of edge type (or `[Edge]`).
+**Where** — a field with a single edge or a list of edges.
 
-```graphql
-mutation AddPost($input: AddPostInput!, $connections: [ID!]!) {
-  addPost(input: $input) {
-    postEdge @prependEdge(connections: $connections) {
-      cursor
-      node { id ...PostRow_post }
+```javascript
+// Mutation
+commitMutation<AppendCommentMutation>(environment, {
+  mutation: graphql`
+    mutation AppendCommentMutation(
+      # Define a GraphQL variable for the connections array
+      $connections: [ID!]!
+      $input: CommentCreateInput
+    ) {
+      commentCreate(input: $input) {
+        # Use @appendEdge or @prependEdge on the edge field
+        feedbackCommentEdge @appendEdge(connections: $connections) {
+          cursor
+          node {
+            id
+          }
+        }
+      }
     }
-  }
-}
-```
-
-```tsx
-commit({
-  variables: { input, connections: [feedConnectionId] },
+  `,
+  variables: {
+    input,
+    // Pass the `connections` array
+    connections: [connectionID],
+  },
 });
 ```
 
 ### `@appendNode` / `@prependNode`
 
-Same placement semantics, but the server returns a node and Relay wraps it in a
-synthesized edge.
+These directives create edges with the specified `edgeTypeName`. `@prependNode` adds edges that contain the selected nodes to the beginning of each connection in the `connections` array. `@appendNode` adds them to the end.
 
-**Signature**
+**Arguments**
+- `connections`: an array of connection IDs.
+- `edgeTypeName`: the type name of the edge that contains the node. It corresponds to the edge type argument in `ConnectionHandler.createEdge`.
 
-```graphql
-@appendNode(connections: [ID!]!, edgeTypeName: String!)
-```
+**Where** — a field with a single node or a list of nodes.
 
-**Where** — a response field of node type.
-
-```graphql
-mutation AddPost($input: AddPostInput!, $connections: [ID!]!) {
-  addPost(input: $input) {
-    post @appendNode(connections: $connections, edgeTypeName: "PostEdge") {
-      id ...PostRow_post
+```javascript
+// Mutation
+commitMutation<AppendCommentMutation>(environment, {
+  mutation: graphql`
+    mutation AppendCommentMutation(
+      # Define a GraphQL variable for the connections array
+      $connections: [ID!]!
+      $input: CommentCreateInput
+    ) {
+      commentCreate(input: $input) {
+        # Use @appendNode or @prependNode on the node field
+        feedbackCommentNode @appendNode(connections: $connections, edgeTypeName: "CommentsEdge") {
+          id
+        }
+      }
     }
-  }
-}
+  `,
+  variables: {
+    input,
+    // Pass the `connections` array
+    connections: [connectionID],
+  },
+});
 ```
-
-**Pitfalls**
-- `edgeTypeName` must exactly match your schema's edge type.
-- The selected node must include `id` so Relay can build the edge.
 
 ### `@deleteEdge`
 
-Removes edges whose node IDs are listed in the payload from each connection.
+Deletes the edges whose nodes match the `id` from each connection in the `connections` array.
 
-**Signature** — `@deleteEdge(connections: [ID!]!)`
+**Arguments** — `connections`: an array of connection IDs.
 
-**Where** — a response field of type `ID` or `[ID!]`.
+**Where** — a GraphQL field that returns an `ID` or `[ID]`.
 
-```graphql
-mutation DeletePosts($input: DeletePostsInput!, $connections: [ID!]!) {
-  deletePosts(input: $input) {
-    deletedPostIds @deleteEdge(connections: $connections)
-  }
-}
+```javascript
+// Mutation
+commitMutation<DeleteCommentsMutation>(environment, {
+  mutation: graphql`
+    mutation DeleteCommentsMutation(
+      # Define a GraphQL variable for the connections array
+      $connections: [ID!]!
+      $input: CommentsDeleteInput
+    ) {
+      commentsDelete(input: $input) {
+        deletedCommentIds @deleteEdge(connections: $connections)
+      }
+    }
+  `,
+  variables: {
+    input,
+    // Pass the `connections` array
+    connections: [connectionID],
+  },
+});
 ```
 
 ### `@deleteRecord`
 
-Deletes the record from the Relay store. An edge that still points to the
-record reads `undefined`.
-
-**Signature** — `@deleteRecord` (no args).
-
-**Where** — a response field of type `ID` (the ID of the record to delete).
+Deletes an item from the store in response to a mutation. Add the directive to the deleted ID. It also works in subscriptions.
 
 ```graphql
-mutation DeleteUser($input: DeleteUserInput!) {
-  deleteUser(input: $input) {
-    deletedUserId @deleteRecord
+mutation DeletePostMutation($input: DeletePostData!) {
+  delete_post(data: $input) {
+    deleted_post {
+      id @deleteRecord
+    }
   }
 }
 ```
-
-**Pitfalls**
-- The field must literally be an ID scalar. Wrap object responses accordingly.
-- `@deleteRecord` deletes the record for every reader. Use `@deleteEdge` to
-  remove an edge from specific connections.
 
 ---
 
@@ -331,98 +381,47 @@ mutation DeleteUser($input: DeleteUserInput!) {
 
 ### `@defer`
 
-Splits a fragment spread out of the initial payload; the server streams it as a
-follow-up. Relay suspends until the deferred chunk arrives (or renders with
-partial data in conjunction with React Suspense).
-
-**Signature** — `@defer(label: String, if: Boolean = true)`
-
-**Where** — fragment spread.
+Applies to a fragment spread or inline fragment. The fragment's data does not block the rest of the response.
 
 ```graphql
-query ProfileQuery($id: ID!) {
-  user(id: $id) {
-    name
-    ...ExpensiveDetails_user @defer(label: "details", if: $showDetails)
+query ParentComponentQuery {
+  user {
+    id
+    ...ChildComponentFragment_user @defer
   }
 }
 ```
-
-```tsx
-function Profile({ queryRef }) {
-  const data = usePreloadedQuery(query, queryRef);
-  return (
-    <>
-      <h1>{data.user.name}</h1>
-      <Suspense fallback={<Spinner />}>
-        <Details user={data.user} />
-      </Suspense>
-    </>
-  );
-}
-```
-
-**Pitfalls**
-- Requires a server that supports GraphQL incremental delivery (`multipart/mixed`
-  or SSE).
-- `label` must be unique per operation.
 
 ### `@stream`
 
-Streams list items progressively. Can be used directly on any list field.
-
-**Signature** — `@stream(label: String, initial_count: Int!, if: Boolean = true)`
-
-**Where** — list field selection.
-
-```graphql
-query SearchQuery($term: String!) {
-  search(term: $term) {
-    results @stream(label: "search_results", initial_count: 5) {
-      id ...ResultRow_result
-    }
-  }
-}
-```
-
-### `@defer` / `@stream` arguments
-
-The exported v20 and v21 sources do not define `@defer` and `@stream`. The
-argument names below come from the runtime tests and `RelayResponseNormalizer.js`,
-identical on v20 and v21 (`initial_count` appears 55 times in each; `initialCount`
-appears 0 times).
-
-| Argument | Applies to | Rule |
-|----------|-----------|------|
-| `label` | `@defer`, `@stream` | String that identifies the incremental chunk |
-| `if` | `@defer`, `@stream` | Boolean literal or variable. Any other value logs a dev warning. |
-| `initial_count` | `@stream` | Snake case. Number of items in the initial payload. |
-
-- `@defer(if: false)`: the data arrives in the initial payload. Relay expects no extra chunk.
-- `@stream(if: false)`: Relay normalizes the initial array and registers no streaming placeholder.
-- `@stream` always normalizes the items of the initial payload, including the first `initial_count` items.
+Applies to a field of `List` type. The individual items of the list arrive incrementally. The client renders the initial set of items while it waits for the server to deliver the rest.
 
 ### `@stream_connection`
 
-`@connection` plus streaming. Used with `usePaginationFragment`; items past
-`initial_count` arrive in follow-up payloads.
+Like `@connection` for pagination, with incremental delivery of the items in the pagination queue. Use it with `usePaginationFragment`.
 
-**Signature** — accepts every `@connection` argument plus
-`label: String`, `initial_count: Int!`, `if: Boolean = true` and `use_customized_batch: Boolean = false`.
+**Signature** — accepts the same arguments as `@connection` plus the optional parameter `initial_count: Int`. `initial_count` is a number (default 0) that controls how many items the initial payload includes. Relay streams the subsequent items.
 
-```graphql
-fragment Friends_user on User
-  @refetchable(queryName: "FriendsPaginationQuery") {
-  friends(first: $count, after: $cursor)
-    @stream_connection(key: "Friends_user_friends", initial_count: 10) {
-    edges { node { id name } }
+```javascript
+graphql`
+  fragment FriendsListComponent_user on User
+  @refetchable(queryName: "FriendsListPaginationQuery") {
+    name
+    friends(first: $count, after: $cursor)
+    @stream_connection(key: "FriendsList_user_friends", initial_count: 2,) {
+      edges {
+        node {
+          name
+          age
+        }
+      }
+    }
   }
-}
+`;
 ```
 
 **Pitfalls**
-- Do not combine `@connection` and `@stream_connection` on the same field.
-- `initial_count` does not cap the total — only the size of the first payload.
+- `initial_count` does not affect how many items arrive in total. It sets how many items the initial payload includes.
 - The v21 and v20 SDL (`relay-extensions.graphql`) declares `@stream_connection(key: String!, filters: [String], handler: String, label: String, initial_count: Int!, if: Boolean = true, use_customized_batch: Boolean = false, dynamicKey_UNSTABLE: String, prefetchable_pagination: Boolean = false)`. The SDL marks `initial_count` as required (`Int!`). The Streaming Pagination guide calls it optional with default 0. Pass it always.
 
 ---
@@ -431,37 +430,33 @@ fragment Friends_user on User
 
 ### `@required`
 
-Bubbles null up if the annotated field is null.
+Declares how null values are handled at runtime. A `@required` field that is null at runtime makes its parent field null. Any field that you annotate with `@required` becomes non-nullable in the generated types for your response.
 
 **Signature** — `@required(action: NONE | LOG | THROW | DANGEROUSLY_THROW_ON_SEMANTICALLY_NULLABLE_FIELD)`
 
 **Where** — field selection.
 
 ```graphql
-fragment UserEmail_user on User {
-  email @required(action: LOG)
-  profile @required(action: LOG) {
-    bio @required(action: THROW)
+query MyQuery {
+  viewer {
+    name @required(action: LOG)
+    age
   }
 }
 ```
 
+If `name` is null, Relay returns `{ viewer: null }`.
+
 | `action` | Behavior |
 |----------|----------|
-| `NONE`   | Parent linked field becomes null |
-| `LOG`    | Same as `NONE` plus a `missing_required_field.log` event to `relayFieldLogger` |
-| `THROW`  | Reading the fragment throws |
-| `DANGEROUSLY_THROW_ON_SEMANTICALLY_NULLABLE_FIELD` | v21 only. Same as `THROW`, allowed on nullable fields when the `disallow_required_action_throw_on_semantically_nullable_fields` feature flag is on. A migration aid; avoid new uses. |
+| `NONE`   | The field is expected to be null sometimes. The parent field becomes null. |
+| `LOG`    | The field is not expected to be null, and the component can still render. The parent field becomes null, and the Relay field logger receives a `missing_required_field.log` event. |
+| `THROW`  | The component cannot render without the field. The component that reads the field throws during render. Use it only under an error boundary. |
+| `DANGEROUSLY_THROW_ON_SEMANTICALLY_NULLABLE_FIELD` | v21 only. Behaves like `THROW` and is allowed on nullable fields. Needed only when the `disallow_required_action_throw_on_semantically_nullable_fields` feature flag is on. A migration path for existing code; the docs strongly discourage new uses. |
 
 **Pitfalls**
-- `@required` applies to the reader, not the network — the field is still
-  fetched.
-- If every selection on a parent object is `@required(THROW)`, the parent is
-  effectively non-null when reading.
-- A `@required` field cannot have an `action` less severe than its `@required`
-  parent (`NONE` < `LOG` < `THROW`).
-- Inside a `@connection`, `@required` on the `node` field or on its direct
-  child fields is a compiler error.
+- A `@required` field cannot have an `action` less severe than its `@required` parent (`NONE` < `LOG` < `THROW`).
+- Inside a `@connection`, `@required` on the `node` field or on its direct child fields is a compiler error.
 - `@required` is local to the fragment. Every selection of the same field in 1
   fragment (for example in several inline fragments) must carry the same
   `@required` declaration. Otherwise the compiler reports
@@ -479,59 +474,54 @@ fragment UserEmail_user on User {
 
 ### `@throwOnFieldError`
 
-Promotes GraphQL field errors in the response to thrown exceptions at read
-time, and makes selections semantically non-null in generated types. It also
-throws when data is missing from the store.
+Applies to fragments and queries. Relay throws an exception when it reads a field with a field error, or when Relay is missing data due to a graph relationship change. The directive also enables non-null generated types for the fields that carry `@semanticNonNull` in the schema.
 
 **Where** — queries and fragments.
 
 ```graphql
-fragment Card_user on User @throwOnFieldError {
+fragment MyFragment on User @throwOnFieldError {
+  id
   name
-  followerCount
 }
 ```
 
-```tsx
-// data.name is typed as string (not string | null)
-const data = useFragment(graphql`...Card_user`, ref);
-```
-
 **Pitfalls**
-- Only safe for fields your UI genuinely cannot render without. Use `@catch` to
-  recover granularly.
+- To handle a specific field error locally in a `@throwOnFieldError` fragment or query, catch it with `@catch`.
 
 ### `@catch`
 
-Catches field errors into a result wrapper instead of throwing.
+Declares how field errors are handled. Relay surfaces the error as part of the data, and does not return null or throw.
 
 **Signature** — `@catch(to: RESULT | NULL)` (default `RESULT`).
+- `RESULT`: the value is `{ ok: true, value: T } | { ok: false, errors: [error] }`.
+- `NULL`: an error inside the `@catch` replaces the value with `null`.
 
 **Where** — fields, fragments, queries, mutations, aliased inline fragments.
 Relay v21 also accepts `@catch` on `@connection` fields and on client edge
 fields.
 
 ```graphql
-fragment Card_user on User @throwOnFieldError {
-  name
-  followerCount @catch
-  latestPost @catch(to: NULL) { title }
+query MyQuery {
+  viewer {
+    name @catch
+    age
+  }
 }
 ```
 
-```tsx
-const { name, followerCount, latestPost } = useFragment(...);
-// followerCount: { ok: true; value: number } | { ok: false; errors: [...] }
-// latestPost:    { title: string } | null
+An error on a `@catch` ancestor field bubbles up to that ancestor:
+
+```graphql
+query MyQuery {
+  viewer @catch {
+    name
+    age
+  }
+}
 ```
 
 **Pitfalls**
-- `RESULT` changes the shape of the generated type — expect a discriminated
-  union.
-- `@catch` at the query root is the typical escape hatch from
-  `@throwOnFieldError`.
-- `@catch` and `@throwOnFieldError` cover the fields of their own query,
-  fragment or mutation. Fields of a spread fragment need their own directive.
+- `@catch` and `@throwOnFieldError` handle only the field errors of their own query, fragment or mutation. Fields of a spread fragment need their own directive.
 - An error bubbles to the nearest `@catch` ancestor. With `@catch` on `viewer`,
   an error on `viewer.name` yields `viewer: { ok: false, errors: [{ path: ['viewer', 'name'] }] }`.
   With `@catch` on `name`, the error stays on `name`.
@@ -544,40 +534,20 @@ const { name, followerCount, latestPost } = useFragment(...);
 
 ### `@semanticNonNull`
 
-Schema-side directive marking fields as *semantically* non-null: the field can
-return null only in error cases. Relay's generated TypeScript types treat the
-field as non-null so you don't have to null-check it at read sites, while the
-runtime still handles error cases gracefully (usually via `@throwOnFieldError`
-or `@catch` at an ancestor selection).
-
-**Signature** — `@semanticNonNull(levels: [Int] = [0])` (levels applies for list
-types — specify which list levels are semantically non-null).
+Schema-side directive. It marks a field as non-nullable in the semantic sense: the field can be null only in the case of an error, and the client still handles errors. Relay generates non-nullable Flow or TypeScript types for these fields when the query or fragment carries `@throwOnFieldError`.
 
 **Where it applies** — schema definition (on field definitions), not in client
 queries.
 
-**Example** (schema):
+```graphql title="schema.graphql"
+directive @semanticNonNull(levels: [Int] = [0]) on FIELD_DEFINITION
 
-```graphql
 type User {
   name: String @semanticNonNull
-  avatarUrl: String @semanticNonNull
-  friends: [User] @semanticNonNull(levels: [0, 1])
 }
 ```
 
-In client code, generated types expose `user.name` as `string`, not `string | null`.
-Must be combined with `@throwOnFieldError` (or a `@catch`) on the reader so
-errors surface rather than crash at runtime.
-
-Schema declaration (SDL):
-
-```graphql
-directive @semanticNonNull(levels: [Int] = [0]) on FIELD_DEFINITION
-```
-
-Relay reads the directive from the schema file. Add a React error boundary above
-each component that reads a `@throwOnFieldError` fragment. The extension SDL
+Add a React error boundary above each component that reads a `@throwOnFieldError` fragment. The extension SDL
 comment names a typegen option
 `experimental_emit_semantic_nullability_types`. No compiler source file at tag
 v20.1.1 or v21.0.1 reads that name. Use `@throwOnFieldError` or `@catch` to get
@@ -585,8 +555,7 @@ the non-null types.
 
 ### `@alias`
 
-Aliases a fragment spread or inline fragment so it reads as a nested object;
-used to make conditional / type-refined fragments null-safe.
+Gives a fragment spread or inline fragment an alias, like a field alias. Use it to conditionally include a fragment and check whether Relay fetched it, or to group data together.
 
 **Signature** — `@alias(as: String)`. `as` is optional. The default alias is
 the fragment name for a fragment spread and the type name for an inline
@@ -595,55 +564,70 @@ fragment. An inline fragment with no type condition needs `as`.
 **Where** — fragment spread, inline fragment.
 
 ```graphql
-fragment Feed_viewer on Viewer {
-  actor {
-    ... on User @alias(as: "asUser") {
-      ...UserCard_user
-    }
+fragment MyFragment on User {
+  ... on User @alias(as: "myGreatAlias") {
+    name
   }
 }
 ```
 
-```tsx
-if (data.actor.asUser != null) {
-  <UserCard user={data.actor.asUser} />;
-}
-```
+**Abstract types.** `@alias` on a spread exposes the fragment key as its own nullable property. A null check shows whether the node implements the fragment's type:
 
-**Pitfalls**
-- Without `@alias`, inline fragments on non-matching types leave fields
-  `undefined` rather than exposing a typed `null`.
+```ts
+function MyNode({nodeKey}) {
+  const node = useFragment(graphql`
+    fragment MyFragment on Node {
+      ...MyViewer @alias(as: "my_viewer")
+    }`, nodeKey);
 
-**Conditional spreads.** `@alias` on a spread with `@skip` / `@include` or an
-abstract type condition exposes the fragment key as a nullable field. A null
-check shows whether Relay fetched the fragment:
-
-```graphql
-fragment MyFragment on User {
-  ...ConditionalData @skip(if: $someVar) @alias
-}
-```
-
-```tsx
-if (user.ConditionalData == null) return "No data fetched";
-return <ConditionalData userKey={user.ConditionalData} />;
-```
-
-**Grouping required fields.** An aliased inline fragment without a type
-condition groups fields that use `@required(action: NONE)`. One null check covers
-the group:
-
-```graphql
-fragment MyFragment on User {
-  id
-  ... @alias(as: "requiredFields") {
-    name @required(action: NONE)
-    email @required(action: NONE)
+  // Relay returns the fragment key as its own nullable property
+  if(node.my_viewer == null) {
+    return null;
   }
+
+  // Because `my_viewer` is typed as nullable, Flow/TypeScript will
+  // show an error if you try to use the `my_viewer` without first
+  // performing a null check.
+  //                          VVVVVVVVVVVVVV
+  return <MyViewer viewerKey={node.my_viewer} />
 }
 ```
 
-If `name` or `email` is null, `user.requiredFields` is null and `id` stays set.
+**Conditional spreads.** `@alias` on a spread with `@skip` / `@include` shows whether Relay fetched the fragment:
+
+```ts
+function MyUser({userKey}) {
+  const user = useFragment(graphql`
+    fragment MyFragment on User {
+      ...ConditionalData @skip(if: $someVar) @alias
+    }`, userKey);
+
+  if(user.ConditionalData == null) {
+    return "No data fetched";
+  }
+  return <ConditionalData userKey={user.ConditionalData} />
+}
+```
+
+**Grouping required fields.** `@alias` with `@required(action: NONE)` groups required fields. If `name` or `email` is null, `user.requiredFields` is null and `id` stays set:
+
+```ts
+function MyUser({userKey}) {
+  const user = useFragment(graphql`
+    fragment MyFragment on User {
+      id
+      ... @alias(as: "requiredFields") {
+        name @required(action: NONE)
+        email @required(action: NONE)
+      }
+    }`, userKey);
+
+  if(user.requiredFields == null) {
+    return `Missing required fields for user ${user.id}`;
+  }
+  return `Hello ${user.requiredFields.name} (${user.requiredFields.email}).!`;
+}
+```
 
 **Enforcement.** Relay requires `@alias` on every conditionally fetched spread
 (`@skip` / `@include`, or a type condition that can mismatch). The compiler
@@ -659,8 +643,7 @@ fixes for both.
 
 ## Resolvers
 
-Resolver tags live in **docblock comments** on exported TS/JS functions and
-types in files the Relay compiler scans. **The tag depends on the Relay
+The Relay compiler looks for `@relayType` and `@relayField` docblocks in your code. It ignores other docblocks. **The tag depends on the Relay
 version:** v21 reads `@relayType` and `@relayField`; v20 reads the single tag
 `@RelayResolver` for both. The examples below use the v21 tags. On v20, write
 `@RelayResolver` in their place. `relay-compiler codemod fix-all` (v21 only)
@@ -668,46 +651,51 @@ migrates the tags.
 
 ### `@relayField` and `@relayType` (v20: `@RelayResolver`)
 
-`@relayField` defines a field. `@relayType` defines a client type.
+`@relayType TypeName` defines a new GraphQL type. An exported function whose name matches the type name follows the docblock. The function accepts an ID as its sole argument and returns the model that backs the type.
 
-**Field form**
-
-```ts
-/**
- * @relayField User.fullName: String
- */
-export function fullName(user: UserModel): string {
-  return `${user.first} ${user.last}`;
-}
-```
+`@relayField TypeName.fieldName: FieldTypeName` defines a new field on the type. The part after the `.` follows GraphQL schema definition language. An exported function whose name matches the field name follows the docblock. The function accepts the model that the type resolver returns, and returns the value of the field.
 
 **Type form**
 
-```ts
+```tsx
 /**
  * @relayType User
  */
-export function User(id: DataID): UserModel {
-  return UserService.getById(id);
+export function User(id): UserModel {
+  return UserModel.getById(id);
 }
 ```
 
-**Pitfalls**
-- The function name must match the field name or the type name in the docblock.
+**Field form**
+
+```tsx
+/**
+ * @relayField User.name: String
+ */
+export function name(user: UserModel): string {
+  return user.name;
+}
+```
 
 ### `@rootFragment`
 
-Names the fragment that a derived field reads. The resolver receives a
-fragment key and reads it with `readFragment()` from `relay-runtime`.
+Defines a derived field. Follow the tag with the name of a fragment that defines the data that the field depends on. Relay passes the resolver a fragment key. Read the fragment data with `readFragment()` from `relay-runtime`. Relay recomputes the field when the data of that fragment changes.
 
-```ts
+```tsx
+import {readFragment} from 'relay-runtime';
+
 /**
  * @relayField User.fullName: String
  * @rootFragment UserFullNameFragment
  */
 export function fullName(key: UserFullNameFragment$key): string {
   const user = readFragment(
-    graphql`fragment UserFullNameFragment on User { firstName lastName }`,
+    graphql`
+      fragment UserFullNameFragment on User {
+        firstName
+        lastName
+      }
+    `,
     key,
   );
   return `${user.firstName} ${user.lastName}`;
@@ -716,60 +704,64 @@ export function fullName(key: UserFullNameFragment$key): string {
 
 ### `@weak`
 
-Marks a model as a value object without an `id`. Used for namespaced field
-groups that belong to a parent.
+Defines a type whose objects have no identifiers. Use `@relayType TypeName` followed by `@weak`. An exported type definition whose name matches the type name follows the docblock.
 
-```ts
+```tsx
 /**
- * @relayType ProfilePicture
- * @weak
- */
-export type ProfilePicture = { url: string; height: number; width: number };
+* @relayType ProfilePicture
+* @weak
+*/
+export type ProfilePicture = {
+  url: string;
+  width: number;
+  height: number;
+};
 ```
 
 ### `@live`
 
-Declares a live resolver whose value changes over time. The function must
-return a `LiveState<T>`.
+Adds a stream of values over time to a field or type definition. A `@live` resolver returns an object with the shape of a `LiveStateValue`, so that Relay can read the current value and subscribe to changes.
 
-```ts
-import type { LiveState } from "relay-runtime";
+```tsx
+import type {LiveState} from 'relay-runtime';
+
 /**
- * @relayField Query.counter: Int
- * @live
- */
+* @relayField Query.counter: Int
+* @live
+*/
 export function counter(): LiveState<number> {
   return {
     read: () => store.getState().counter,
-    subscribe: (cb) => store.subscribe(cb),
+    subscribe: cb => {
+      return store.subscribe(cb);
+    },
   };
 }
 ```
 
 **Pitfalls**
-- Confirm that the value changed before you call the subscriber. Relay
-  supports extra notifications, and each one costs work.
-- Batch updates with `relayStore.batchLiveStateUpdates` when bursting.
+- Confirm that the value changed before you notify Relay. Relay supports
+  over-notification, and each extra notification costs work.
+- Wrap state updates in `batchLiveStateUpdates()` on your `RelayStore` instance to batch updates to `@live` resolvers.
 
 ### `@waterfall`
 
-A GraphQL directive on the selection that reads a resolver edge to a server
-type. Relay fetches the server data for that edge in a second request, and the
-compiler requires `@waterfall` on each read of such a field.
+A resolver edge to a server type makes Relay fetch the server data for the edge lazily. This forces a second request to the server. The compiler expects every read of such a field to carry `@waterfall`.
 
-```ts
+```tsx
+import {DataID} from 'relay-runtime';
 /**
- * @relayField Post.author: ServerUser
+ * @relayField Post.author: User
  */
 export function author(post: PostModel): DataID {
   return post.authorId;
 }
 ```
 
-`ServerUser` is a server type that implements `Node`. The resolver returns its ID.
+`User` is a server type that implements `Node`. The resolver returns its ID.
 
 ```graphql
-fragment PostByline_post on Post {
+fragment EditPost on DraftPost {
   author @waterfall {
     name
   }
@@ -782,95 +774,75 @@ fragment PostByline_post on Post {
 
 ### `@preloadable`
 
-Required when a query is used with `loadQuery` / `useQueryLoader` or from
-entrypoints. Causes the compiler to emit a `$Parameters.js` file.
+Modifies a query. Relay generates `$Parameters.js` files and preloadable concrete requests. Required if the query is part of an entry point.
 
 **Where** — query definition.
 
-```graphql
-query HomeQuery @preloadable { viewer { ...Feed_viewer } }
-```
-
-```tsx
-const [queryRef, loadQuery] = useQueryLoader(HomeQuery);
-loadQuery({});
-```
-
-**Pitfalls**
-- Forget `@preloadable` and `loadQuery` will throw at runtime.
-
 ### `@raw_response_type`
 
-Emits a type for `optimisticResponse`. Add to any query or mutation whose
-optimistic payload you want type-checked.
+Tells Relay to generate types that cover the `optimisticResponse` parameter of `commitMutation`.
 
 **Where** — query / mutation definition.
 
 ```graphql
-mutation ToggleLike($id: ID!) @raw_response_type {
-  toggleLike(id: $id) { post { id viewerHasLiked } }
-}
-```
-
-```tsx
-commit({
-  variables: { id },
-  optimisticResponse: { toggleLike: { post: { id, viewerHasLiked: true } } },
-});
-```
-
-### `@no_inline`
-
-Prevents the compiler from inlining a fragment into every parent. Useful for
-fragments used in many queries, reducing generated artifact size, and required
-in some `@module` configurations.
-
-**Where** — fragment definition.
-
-```graphql
-fragment Expensive_node on Node @no_inline {
-  ... # lots of selections
-}
-```
-
-**Pitfalls**
-- Interacts with `@module` — normal fragments can be auto-`@no_inline` when
-  referenced by a module boundary.
-
-### `@match` / `@module`
-
-Data-driven code splitting (3D). `@match` flags a field whose concrete type
-determines which bundle to download; `@module` names the bundle per variant.
-
-**Signatures**
-
-```graphql
-@match(key: String)              # key optional; compiler derives one
-@module(name: "path/to/file.js")
-```
-
-**Where** — `@match` on a field returning a union/interface;
-`@module` on a fragment spread inside that selection. `@module` also works on
-a fragment spread without `@match`.
-
-```graphql
-fragment Story_story on Story {
-  hero @match {
-    ...ImageHero_hero @module(name: "ImageHero.react")
-    ...VideoHero_hero @module(name: "VideoHero.react")
+mutation LikeButtonMutation($input: FeedbackLikeData!)
+@raw_response_type {
+  feedback_like(data: $input) {
+    feedback {
+      viewer_does_like
+      like_count
+    }
   }
 }
 ```
 
-```tsx
-import { MatchContainer } from "react-relay";
-<MatchContainer match={data.hero} />;
+### `@match` / `@module`
+
+Data-driven code splitting (3D). `@match` marks a field whose data decides which dependencies to load. `@module(name: String)` on a fragment spread names the React component to download if the data exists and the fragment's type matches.
+
+**Where** — `@match` on a field; `@module` on fragment spreads inside that selection. `@module` also works on a fragment spread without `@match`, to load a non-React module for a field that is not null.
+
+```graphql
+fragment Comment_comment on Comment {
+  comment_content_renderer @match {
+    ...CommentMarkdownRenderer_comment
+      @module(name: "CommentMarkdownRenderer.react")
+
+    ...CommentPlaintextRenderer_comment
+      @module(name: "CommentPlaintextRenderer.react")
+  }
+}
 ```
 
-**Pitfalls**
-- Requires a loader (e.g. Webpack / Haste) that resolves `@module(name:)`
-  strings.
-- With the `no_inline` feature flag on, `@module` makes its fragment `@no_inline` implicitly. If a regular spread also uses that fragment, the compiler requires an explicit `@no_inline` on the fragment definition.
+Render the selected component with `MatchContainer`:
+
+```js
+const {useFragment, graphql, MatchContainer} = require('react-relay');
+
+function CommentRenderer(props) {
+  const comment = useFragment(
+    /* fragment Comment_comment from above */,
+    props.comment,
+  );
+
+  if (comment.image == null) {
+    // Handle cases where the field failed to load or was null
+    return null;
+  }
+  // MatchContainer may suspend while loading the component or its data,
+  // consider wrapping with React.Suspense.
+  return (
+    <Suspense fallback={null}>
+      <MatchContainer
+        // data for field containing @module selection
+        match={comment.image}
+        props={{ /* ...other props... */ }}
+      />
+    </Suspense>
+  );
+}
+module.exports = CommentRenderer;
+```
 
 **Rules (Server 3D and Client 3D)**
 
@@ -882,32 +854,33 @@ import { MatchContainer } from "react-relay";
 ```graphql
 fragment Example_comment on Comment {
   comment_content_renderer @match {
-    ...CommentMarkdownRenderer_comment @module(name: "CommentMarkdownRenderer.react")
+    ...CommentMarkdownRenderer_comment
+      @module(name: "CommentMarkdownRenderer.react")
   }
   attachments {
     attachment_renderer @match(key: "Example_comment__attachment") {
-      ...CommentAttachmentPhotoRenderer_comment @module(name: "CommentPhotoRenderer.react")
+      ...CommentAttachmentPhotoRenderer_comment
+        @module(name: "CommentPhotoRenderer.react")
     }
   }
 }
 ```
 
-- `@module` also works without `@match` on a single concrete type, as in `image { ...CommentImage_image @module(name: "CommentImage.react") }`.
-
 **Server 3D** needs server support. In OSS, each concrete type exposes `__component: JSDependency` and `__fragment: JSDependency`, and the `@match` field takes a `supported: [String!]` argument that the compiler fills in. The docs say Relay does not fully support Server 3D in OSS.
 
-**Client 3D** reads data from client-side resolvers (interface in a client schema extension, concrete resolver types that implement it, query through `useClientQuery`). It needs the `moduleImportConfig` compiler option:
+**Client 3D** reads data from client-side resolvers (interface in a client schema extension, concrete resolver types that implement it, query through `useClientQuery`). It needs the `moduleImportConfig` compiler option. `dynamicModuleProvider.mode` is `Custom` and `surface` is `resolvers`. `statement` is the statement that imports your UI module `<$module>`.
 
-```json
-{
-  "moduleImportConfig": {
-    "dynamicModuleProvider": { "mode": "Custom", "statement": "() => require('./<$module>')" },
+```js
+"moduleImportConfig": {
+    "dynamicModuleProvider": {
+        "mode": "Custom",
+        "statement": "() => require('./<$module>')"
+    },
     "surface": "resolvers"
-  }
 }
 ```
 
-`<$module>` stands for the `@module(name:)` value. In OSS, `mode` is `Custom` and `surface` is `resolvers`. Client 3D can need extra round trips, because the client renders first to learn which code to load. Avoid nested Client 3D.
+Client 3D can need extra round trips, because the client renders first to learn which code to load. Avoid nested Client 3D.
 
 ---
 
@@ -922,8 +895,16 @@ a linked field accepts. Its only field is `__typename`. Both exist on v20 and
 v21 with the same definition. See `updating-data.md`, "Typesafe Updaters".
 
 ```graphql
-fragment Foo_updatable_user on User @updatable { is_selected }
-fragment Foo_assignable_user on User @assignable { __typename }
+fragment StoryLikeButton_updatable on Story @updatable {
+  likeCount
+  doesViewerLike
+}
+```
+
+```graphql
+fragment AssignBestFriendButton_assignable_user on User @assignable {
+  __typename
+}
 ```
 
 ## Compiler config tied to directives
@@ -984,8 +965,7 @@ Only 2 definitions differ in `relay-extensions.graphql`:
 | `@weak`                | docblock                                        | Value-object model without id |
 | `@live`                | docblock                                        | Live resolver (LiveState<T>) |
 | `@waterfall`           | field reading a resolver edge to a server type  | Acknowledge the second request |
-| `@preloadable`         | query def                                       | Emit $Parameters for loadQuery |
+| `@preloadable`         | query def                                       | Emit $Parameters for entry points |
 | `@raw_response_type`   | query / mutation def                            | Type optimisticResponse |
-| `@no_inline`           | fragment def                                    | Don't inline into parents |
 | `@match`               | union/interface field                           | 3D code-split selector |
 | `@module`              | fragment spread                                 | Bundle path per variant |
